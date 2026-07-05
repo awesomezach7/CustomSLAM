@@ -1,0 +1,295 @@
+#include <Arduino.h>
+#define PI 3.1415926535897932384626433832795
+#include <cmath>
+#include <vector>
+#include <nanoflann.hpp>
+#include <iostream>
+#include <ctime>
+#include <cstdlib>
+
+// Includes
+#include <LSM6DSO32Sensor.h>
+
+#ifdef ARDUINO_SAM_DUE
+  #define DEV_I2C Wire1
+#elif defined(ARDUINO_ARCH_STM32)
+  #define DEV_I2C Wire
+#elif defined(ARDUINO_ARCH_AVR)
+  #define DEV_I2C Wire
+#else
+  #define DEV_I2C Wire
+#endif
+#define SerialPort Serial
+
+//Calibration offsets:
+const double accoffset[3] = {36.8,-2.87,-36.5};
+const double gyrooffset[3] = {-342.2, 448.3, 790.0};
+// Components
+LSM6DSO32Sensor AccGyr(&DEV_I2C);
+
+#include <Quaternion.h>
+unsigned long startTime = micros();
+unsigned long endTime = micros();
+double elapsedTime = endTime - startTime;
+
+#include <SparkFun_VL53L5CX_Library.h> //http://librarymanager/All#SparkFun_VL53L5CX
+#include <Wire.h>
+SparkFun_VL53L5CX ToF;
+VL53L5CX_ResultsData distData; // Result data class structure, 1356 byes of RAM
+int imageWidth = 0; //Used to pretty print output
+
+// ST_ANGLES to interpret distances
+double ST_PITCH_ANGLES_DEG[64] = {
+    59.00, 64.00, 67.50, 70.00, 70.00, 67.50, 64.00, 59.00,
+    64.00, 70.00, 72.90, 74.90, 74.90, 72.90, 70.00, 64.00,
+    67.50, 72.90, 77.40, 80.50, 80.50, 77.40, 72.90, 67.50,
+    70.00, 74.90, 80.50, 85.75, 85.75, 80.50, 74.90, 70.00,
+    70.00, 74.90, 80.50, 85.75, 85.75, 80.50, 74.90, 70.00,
+    67.50, 72.90, 77.40, 80.50, 80.50, 77.40, 72.90, 67.50,
+    64.00, 70.00, 72.90, 74.90, 74.90, 72.90, 70.00, 64.00,
+    59.00, 64.00, 67.50, 70.00, 70.00, 67.50, 64.00, 59.00,
+};
+double ST_YAW_ANGLES_DEG[64] = {
+    135.00, 125.40, 113.20,  98.13,  81.87,  66.80,  54.60,  45.00,
+    144.60, 135.00, 120.96, 101.31,  78.69,  59.04,  45.00,  35.40,
+    156.80, 149.04, 135.00, 108.45,  71.55,  45.00,  30.96,  23.20,
+    171.87, 168.69, 161.55, 135.00,  45.00,  18.45,  11.31,   8.13,
+    188.13, 191.31, 198.45, 225.00, 315.00, 341.55, 348.69, 351.87,
+    203.20, 210.96, 225.00, 251.55, 288.45, 315.00, 329.04, 336.80,
+    215.40, 225.00, 239.04, 258.69, 281.31, 300.96, 315.00, 324.60,
+    225.00, 234.60, 246.80, 261.87, 278.13, 293.20, 305.40, 315.00,
+};
+
+double pdist[64];
+
+boolean newData = false;
+
+//TWEAKABLE VALUES
+#define ToF_Sharpness 20
+#define microsteps 15
+#define max_leaf 12
+#define ICP_Iterations 10
+//Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
+
+void setup()
+{
+  for (int i = 0; i < 64; i++) {
+    pdist[i] = 0.0;
+  }
+  delay(20);
+  // Led.
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  // Initialize serial for output.
+  SerialPort.begin(115200);
+  delay(300);
+  SerialPort.write("Setting up...");
+
+  // Initialize I2C bus.
+  DEV_I2C.begin();
+  AccGyr.begin();
+  AccGyr.Enable_X();
+  AccGyr.Enable_G();
+  AccGyr.Set_G_FS(500);
+  AccGyr.Set_X_FS(8);
+  delay(20);
+
+  Wire.begin(); //This resets to 100kHz I2C
+  Wire.setClock(400000); //Sensor has max I2C freq of 400kHz 
+  Serial.println("Initializing sensor board. This can take up to 10s. Please wait.");
+  if (ToF.begin() == false)
+  {
+    Serial.println(F("ToF Sensor not found - check your wiring. Freezing"));
+    while (1) ;
+  }
+  ToF.setSharpenerPercent(ToF_Sharpness);
+
+  ToF.setResolution(8*8); //Enable all 64 pads
+  ToF.setRangingFrequency(15);
+  imageWidth = sqrt(ToF.getResolution()); //Calculate printing width
+  ToF.startRanging();
+}
+
+Quaternion Orientation(1, 0, 0, 0);
+double velocity[3] = {0, 0, 0};
+double position[3] = {0, 0, 0};
+//From utils.h, gives definition of PointCloud that can be used to initialize a kd tree
+template <typename T>
+struct PointCloud
+{
+    struct Point
+    {
+        T x, y, z;
+    };
+
+    using coord_t = T;  //!< The type of each coordinate
+
+    std::vector<Point> pts;
+
+    // Must return the number of data points
+    inline size_t kdtree_get_point_count() const { return pts.size(); }
+
+    // Returns the dim'th component of the idx'th point in the class:
+    // Since this is inlined and the "dim" argument is typically an immediate
+    // value, the
+    //  "if/else's" are actually solved at compile time.
+    inline T kdtree_get_pt(const size_t idx, const size_t dim) const
+    {
+        if (dim == 0)
+            return pts[idx].x;
+        else if (dim == 1)
+            return pts[idx].y;
+        else
+            return pts[idx].z;
+    }
+
+    // Optional bounding-box computation: return false to default to a standard
+    // bbox computation loop.
+    //   Return true if the BBOX was already computed by the class and returned
+    //   in "bb" so it can be avoided to redo it again. Look at bb.size() to
+    //   find out the expected dimensionality (e.g. 2 or 3 for point clouds)
+    template <class BBOX>
+    bool kdtree_get_bbox(BBOX& /* bb */) const
+    {
+        return false;
+    }
+};
+inline void dump_mem_usage()
+{
+    FILE* f = fopen("/proc/self/statm", "rt");
+    if (!f) return;
+    char   str[300];
+    size_t n = fread(str, 1, 200, f);
+    str[n]   = 0;
+    printf("MEM: %s\n", str);
+    fclose(f);
+}
+
+PointCloud<float> cloud;
+using my_kd_tree_t = nanoflann::KDTreeSingleIndexDynamicAdaptor<
+        nanoflann::L2_Simple_Adaptor<float, PointCloud<float>>, PointCloud<float>, 3 /* dim */
+        >;
+my_kd_tree_t index(3, cloud, max_leaf);
+// Cannot call functions at top level to add points
+
+void loop()
+{
+  if ((millis() / 1000) % 2 == 0) {
+    digitalWrite(LED_BUILTIN, HIGH);
+  } else {
+    digitalWrite(LED_BUILTIN, LOW);
+  }
+  // Read accelerometer and gyroscope.
+  int32_t acc[3];
+  int32_t gyro[3];
+  double accelerometer[3];
+  double gyroscope[3];
+  double trueAccel[3];
+  AccGyr.Get_X_Axes(acc);
+  AccGyr.Get_G_Axes(gyro);
+  //Subtract Sample sums
+  for(int i = 0; i < 3; i++) {
+    //Changing to better type
+    accelerometer[i] = acc[i];
+    gyroscope[i] = gyro[i];
+    //Calibration Offset
+    accelerometer[i] += accoffset[i];
+    gyroscope[i] += gyrooffset[i];
+  }
+  endTime = micros();
+  elapsedTime = double(endTime - startTime)/1000000.0; //seconds
+  startTime = micros();
+  for (int i = 0; i < microsteps; i++) { //Apply quaternions evenly through several steps
+    Orientation *= Quaternion(cos(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), sin(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), 0, 0);
+    Orientation *= Quaternion(cos(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0, sin(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0);
+    Orientation *= Quaternion(cos(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)), 0, 0, sin(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)));
+  }
+  Orientation.normalize(); //I am betting this will decrease weird bugs
+  Quaternion trueAcceleration = (Orientation * Quaternion(0, float(accelerometer[0]), float(accelerometer[1]), float(accelerometer[2])) * Orientation.conjugate());
+  //From milliGs to m/s^2
+  trueAccel[0] = trueAcceleration.x * 9.8/1000.0;
+  trueAccel[1] = trueAcceleration.y * 9.8/1000.0;
+  trueAccel[2] = trueAcceleration.z * 9.8/1000.0;
+  for(int i = 0; i < 3; i++) {
+    //Double integration step (Not messing with trapezoids, ICP should fix anyways)
+    velocity[i] += trueAccel[i] * elapsedTime;
+    position[i] += velocity[i] * elapsedTime;
+  }
+  // Output data.
+  SerialPort.print("Orientation,");
+  SerialPort.print(Orientation.w);
+  SerialPort.print(",");
+  SerialPort.print(Orientation.x);
+  SerialPort.print(",");
+  SerialPort.print(Orientation.y);
+  SerialPort.print(",");
+  SerialPort.print(Orientation.z);
+  SerialPort.print(",");
+  SerialPort.print("Position,");
+  SerialPort.print(position[0]);
+  SerialPort.print(",");
+  SerialPort.print(position[1]);
+  SerialPort.print(",");
+  SerialPort.println(position[3]);
+  //Distance Sensor Output
+  if (ToF.isDataReady())
+  {
+    if (ToF.getRangingData(&distData)) //Read distance data into array
+    {
+      double newcloud[64][3];
+      int n = 0; //Number of data points that changed their distance
+      //The ST library returns the data transposed from zone mapping shown in datasheet
+      //Pretty-print data with increasing y, decreasing x to reflect reality
+      for (int y = 0 ; y <= imageWidth * (imageWidth - 1) ; y += imageWidth)
+      {
+        for (int x = imageWidth - 1 ; x >= 0 ; x--)
+        {
+          double dist = distData.distance_mm[x + y];
+          Serial.print("\t");
+          Serial.print(dist);
+          Serial.print(",");
+          if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
+            n++;
+            // === ST Lookup Table Method ===
+            // Compute sin/cos for ST-calibrated pitch/yaw angles
+            double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * PI/180;
+            double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * PI/180;
+            // Compute ST ray directions (normalized)
+            // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
+            // Negate X to match our lens-flip convention
+            double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // This division is done strangely in reference
+            double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
+            double st_ray_dir_z = 1;
+            //Point in Sensor's reference frame:
+            double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
+            //Point in GLOBAL reference frame:
+            Quaternion point_prime = Orientation * Quaternion(0, point[0], point[1], point[2]) * Orientation.conjugate();
+            double truepoint[3] = {point_prime.x, point_prime.y, point_prime.z}; //Apply quaternion to point
+            for (int i = 0; i < 3; i++){
+              truepoint[i] += position[i]; // Application of position
+              newcloud[x+y][i] = truepoint[i];
+            }
+            pdist[x+y] = dist;
+          } else {
+            for (int i = 0; i < 3; i++){
+              newcloud[x+y][i] = 0; //Used to signify untrustable data
+            }
+          }
+        }
+      }
+      Serial.println();
+      //ICP
+      //TODO: CHECK KD TREE NOT EMPTY
+      //TODO: FIND A WAY TO FILTER DATA TOO FAR FROM ANY PREVIOUSLY SCANNED POINT (Either direct distance threshold of 0.35m or furthest 50% of data (or a combination of percentile and distance?))
+      for (int i = 0; i < ICP_Iterations; i++){
+        for (int point = 0; point < 64; point++){ //Iterate over every point
+          //TODO: Search kd tree to find closest point
+          //TODO: Use vector part of data to move toward
+          //TODO: Add to a "center of mass" movement
+        }
+        //TODO: Calculate and apply "center of mass" transformation to points and robot
+      }
+      //TODO: Loop Closure/RANSAC?
+    }
+  }
+}
