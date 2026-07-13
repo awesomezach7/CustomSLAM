@@ -6,6 +6,7 @@
 #include <iostream>
 #include <ctime>
 #include <cstdlib>
+#include <ArduinoEigen.h>
 
 // Includes
 #include <LSM6DSO32Sensor.h>
@@ -68,8 +69,51 @@ boolean newData = false;
 #define ToF_Sharpness 20
 #define microsteps 15
 #define max_leaf 12
-#define ICP_Iterations 10
+#define ICP_Iterations 15
+#define filter_distance 0.4
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
+
+void interpretDistances(VL53L5CX_ResultsData distData, float newCloud[64][3]) {
+  //The ST library returns the data transposed from zone mapping shown in datasheet
+  //Pretty-print data with increasing y, decreasing x to reflect reality
+  for (int y = 0 ; y <= imageWidth * (imageWidth - 1) ; y += imageWidth)
+  {
+    for (int x = imageWidth - 1 ; x >= 0 ; x--)
+    {
+      double dist = distData.distance_mm[x + y];
+      Serial.print("\t");
+      Serial.print(dist);
+      Serial.print(",");
+      if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
+        // === ST Lookup Table Method ===
+        // Compute sin/cos for ST-calibrated pitch/yaw angles
+        double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * PI/180;
+        double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * PI/180;
+        // Compute ST ray directions (normalized)
+        // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
+        // Negate X to match our lens-flip convention
+        double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // This division is done strangely in reference
+        double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
+        double st_ray_dir_z = 1;
+        //Point in Sensor's reference frame:
+        double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
+        //Point in GLOBAL reference frame:
+        Quaternion point_prime = Orientation * Quaternion(0, point[0], point[1], point[2]) * Orientation.conjugate();
+        double truepoint[3] = {point_prime.x, point_prime.y, point_prime.z}; //Apply quaternion to point
+        for (int i = 0; i < 3; i++){
+          truepoint[i] += position[i]; // Application of position
+          newCloud[x+y][i] = truepoint[i];
+        }
+        pdist[x+y] = dist;
+      } else {
+        for (int i = 0; i < 3; i++){
+          newCloud[x+y][i] = 0; //Used to signify untrustable data
+        }
+      }
+    }
+  }
+  Serial.println();
+}
 
 void setup()
 {
@@ -108,6 +152,7 @@ void setup()
   ToF.setRangingFrequency(15);
   imageWidth = sqrt(ToF.getResolution()); //Calculate printing width
   ToF.startRanging();
+  dump_mem_usage();
 }
 
 Quaternion Orientation(1, 0, 0, 0);
@@ -231,65 +276,58 @@ void loop()
   SerialPort.print(position[1]);
   SerialPort.print(",");
   SerialPort.println(position[3]);
-  //Distance Sensor Output
-  if (ToF.isDataReady())
-  {
-    if (ToF.getRangingData(&distData)) //Read distance data into array
-    {
-      double newcloud[64][3];
-      int n = 0; //Number of data points that changed their distance
-      //The ST library returns the data transposed from zone mapping shown in datasheet
-      //Pretty-print data with increasing y, decreasing x to reflect reality
-      for (int y = 0 ; y <= imageWidth * (imageWidth - 1) ; y += imageWidth)
-      {
-        for (int x = imageWidth - 1 ; x >= 0 ; x--)
-        {
-          double dist = distData.distance_mm[x + y];
-          Serial.print("\t");
-          Serial.print(dist);
-          Serial.print(",");
-          if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
-            n++;
-            // === ST Lookup Table Method ===
-            // Compute sin/cos for ST-calibrated pitch/yaw angles
-            double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * PI/180;
-            double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * PI/180;
-            // Compute ST ray directions (normalized)
-            // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
-            // Negate X to match our lens-flip convention
-            double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // This division is done strangely in reference
-            double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
-            double st_ray_dir_z = 1;
-            //Point in Sensor's reference frame:
-            double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
-            //Point in GLOBAL reference frame:
-            Quaternion point_prime = Orientation * Quaternion(0, point[0], point[1], point[2]) * Orientation.conjugate();
-            double truepoint[3] = {point_prime.x, point_prime.y, point_prime.z}; //Apply quaternion to point
-            for (int i = 0; i < 3; i++){
-              truepoint[i] += position[i]; // Application of position
-              newcloud[x+y][i] = truepoint[i];
-            }
-            pdist[x+y] = dist;
-          } else {
-            for (int i = 0; i < 3; i++){
-              newcloud[x+y][i] = 0; //Used to signify untrustable data
-            }
+  //Distance Sensor Output (Populating newCloud)
+  if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //Read distance data into array
+    float newCloud[64][3];
+    interpretDistances(distData, newCloud);
+    
+    //ICP
+    for (int i = 0; i < ICP_Iterations; i++){
+      Eigen::MatrixXf A;
+      Eigen::VectorXf b;
+      for (int point = 0; point < 64; point++){ //Iterate over every point
+        //Search kd tree to find closest point
+        size_t num_results = 3;
+        nanoflann::KNNResultSet<float> resultSet(num_results);
+        size_t ret_index[num_results];
+        float out_dist_sqr[num_results]; //Square of distance
+        resultSet.init(ret_index, out_dist_sqr);
+        index.findNeighbors(resultSet, newCloud[point], {});
+        if(ret_index != NULL) { //If no points are found, the KD tree is empty and iterations are skipped (Doing this inside the loop causes negligible performance penalty)
+          if (out_dist_sqr[0] <= filter_distance^2) { // For filtering, the closest point needs to be relatively close
+            //PQ = cloud.pts[ret_index[0]] - cloud.pts[ret_index[1]]
+            //PR = cloud.pts[ret_index[0]] - cloud.pts[ret_index[2]]
+            //Normal vector is cross product
+            PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
+            PointCloud<float>::Point pt2 = cloud.pts[ret_index[1]];
+            PointCloud<float>::Point pt3 = cloud.pts[ret_index[2]];
+            float a_1 = pt1.x - pt2.x;
+            float a_2 = pt1.y - pt2.y;
+            float a_3 = pt1.z - pt2.z;
+            float b_1 = pt1.x - pt3.x;
+            float b_2 = pt1.y - pt3.y;
+            float b_3 = pt1.z - pt3.z;
+            float nx = (a_2 * b_3) - (a_3 * b_2); // normal vector values
+            float ny = (a_3 * b_1) - (a_1 * b_3);
+            float nz = (a_1 * b_2) - (a_2 * b_1);
+            float dx = pt1.x;
+            float dy = pt1.y;
+            float dz = pt1.z;
+            float sx = newCloud[point][0];
+            float sy = newCloud[point][1];
+            float sz = newCloud[point][2];
+            Eigen::VectorXf row;
+            row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
+            float value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
+            A.conservativeResize(A.rows() + 1, A.cols());
+            A.row(A.rows() - 1) = row;
+            b.conservativeResize(b.size() + 1);
+            b(b.size() - 1) = value;
           }
         }
       }
-      Serial.println();
-      //ICP
-      //TODO: CHECK KD TREE NOT EMPTY
-      //TODO: FIND A WAY TO FILTER DATA TOO FAR FROM ANY PREVIOUSLY SCANNED POINT (Either direct distance threshold of 0.35m or furthest 50% of data (or a combination of percentile and distance?))
-      for (int i = 0; i < ICP_Iterations; i++){
-        for (int point = 0; point < 64; point++){ //Iterate over every point
-          //TODO: Search kd tree to find closest point
-          //TODO: Use vector part of data to move toward
-          //TODO: Add to a "center of mass" movement
-        }
-        //TODO: Calculate and apply "center of mass" transformation to points and robot
-      }
-      //TODO: Loop Closure/RANSAC?
+      //TODO: Calculate and apply "center of mass" transformation to points and sensor position
     }
+    //TODO: Loop Closure/RANSAC?
   }
 }
