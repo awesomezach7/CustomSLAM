@@ -219,6 +219,7 @@ my_kd_tree_t index(3, cloud, max_leaf);
 
 void loop()
 {
+  //IO Core
   if ((millis() / 1000) % 2 == 0) {
     digitalWrite(LED_BUILTIN, HIGH);
   } else {
@@ -276,15 +277,16 @@ void loop()
   SerialPort.print(position[1]);
   SerialPort.print(",");
   SerialPort.println(position[3]);
-  //Distance Sensor Output (Populating newCloud)
+  // SLAM Core
+  // Distance Sensor Output (Populating newCloud)
   if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //Read distance data into array
     float newCloud[64][3];
     interpretDistances(distData, newCloud);
     
     //ICP
     for (int i = 0; i < ICP_Iterations; i++){
-      Eigen::MatrixXf A;
-      Eigen::VectorXf b;
+      Eigen::MatrixXf A = Eigen::MatrixXf::Zero(0, 6);
+      Eigen::VectorXf b = Eigen::VectorXf::Zero(0);
       for (int point = 0; point < 64; point++){ //Iterate over every point
         //Search kd tree to find closest point
         size_t num_results = 3;
@@ -326,8 +328,20 @@ void loop()
           }
         }
       }
-      //TODO: Calculate and apply "center of mass" transformation to points and sensor position
+      Eigen::VectorXf x_opt = Eigen::pseudoInverse(A)*b;
+      //x_opt is a vector starting with euler angles, then translational position, centered at (0, 0, 0)
+      //It must be applied to both the sensor position and newCloud
+      //TODO: Apply optimal transformation to sensor
+
+      //TODO: Update velocity (drag towards new value at 1/2 ratio)
+
+      //TODO: Apply optimal transformation to newCloud
+      for(int point = 0; point < 64; point++) {
+
+      }
     }
+    //TODO: Update Kd Tree
+    //TODO: Send points to be displayed
     //TODO: Loop Closure/RANSAC?
   }
 }
