@@ -98,15 +98,12 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
         double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
         //Point in GLOBAL reference frame:
         Eigen::Quaternionf point_prime = Orientation * Eigen::Quaternionf(0, point[0], point[1], point[2]) * Orientation.conjugate();
-        double truepoint[3] = {point_prime.x(), point_prime.y(), point_prime.z()}; //Apply quaternion to point
-        for (int i = 0; i < 3; i++){
-          truepoint[i] += position[i]; // Application of position
-          newCloud[x+y][i] = truepoint[i];
-        }
+        newCloud[x+y] = {point_prime.x() + position[0], point_prime.y() + position[1], point_prime.z() + position[2]}; //Quaternion + position
         pdist[x+y] = dist;
       } else {
         for (int i = 0; i < 3; i++){
           newCloud[x+y][i] = 0; //Used to signify untrustable data
+          //TODO: Do this without it thinking it found matching points at the origin
         }
       }
     }
@@ -286,6 +283,7 @@ void loop()
       Eigen::MatrixXf A = Eigen::MatrixXf::Zero(0, 6);
       Eigen::VectorXf b = Eigen::VectorXf::Zero(0);
       for (int point = 0; point < 64; point++){ //Iterate over every point
+        //TODO: Handle bad point case
         //HERE IS WHERE TO FIND OPTIMIZATIONS
         //Search kd tree to find closest point
         const size_t num_results = 3;
@@ -312,6 +310,7 @@ void loop()
             float nx = (a_2 * b_3) - (a_3 * b_2); // normal vector values
             float ny = (a_3 * b_1) - (a_1 * b_3);
             float nz = (a_1 * b_2) - (a_2 * b_1);
+            //This can be any scale, because increasing the scale scales up A and b, which is cancelled at Eigen::pseudoInverse(A)*b.
             float dx = pt1.x;
             float dy = pt1.y;
             float dz = pt1.z;
@@ -342,15 +341,36 @@ void loop()
       //Apply optimal transformation to sensor position (same as pointcloud)
       Eigen::Vector3d delta = transform * position - position;
       position = transform * position;
-      //TODO: Update velocity (drag towards new value at 1/2 ratio)
+      //Update velocity (drag towards new value at 1/2 ratio)
       velocity += delta/(2*elapsedTime);
-      //TODO: Apply optimal transformation to newCloud
+      //Apply optimal transformation to newCloud
       for(int point = 0; point < 64; point++) {
-        
+        //TODO: Handle bad point case
+        newCloud[point] = transform * newCloud[point];
       }
     }
-    //TODO: Update Kd Tree
-    //TODO: Send points to be displayed
+    //All ICP iterations completed, newCloud now has points that line up with previous points
+    //Update Kd Tree
+    size_t old_size = cloud.kdtree_get_point_count();
+    SerialPort.print("NewPts"); //Start point data transfer to computer
+    for(int point = 0; point < 64; point++) {
+      //TODO: handle bad point case
+      //Add point to cloud
+      cloud.pts[old_size + point] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
+      //Send point to be displayed
+      SerialPort.print(",");
+      SerialPort.print(newCloud[point][0]);
+      SerialPort.print(",");
+      SerialPort.print(newCloud[point][1]);
+      SerialPort.print(",");
+      SerialPort.print(newCloud[point][2]);
+    }
+    SerialPort.println(); //Space to new line
+    size_t new_size = cloud.kdtree_get_point_count();
+    //Add new points to index
+    //O(n) because tree is reformed after each chunk, luckily only done 15Hz not 15*64Hz
+    index.addPoints(old_size, new_size - 1);
     //TODO: Loop Closure/RANSAC?
+    dump_mem_usage();
   }
 }
