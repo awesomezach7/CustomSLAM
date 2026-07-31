@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#define PI 3.1415926535897932384626433832795
 #include <cmath>
 #include <vector>
 #include <nanoflann.hpp>
@@ -72,84 +71,6 @@ boolean newData = false;
 #define filter_distance 0.4
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
 
-void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3f, 64>& newCloud) {
-  //The ST library returns the data transposed from zone mapping shown in datasheet
-  //Pretty-print data with increasing y, decreasing x to reflect reality
-  for (int y = 0 ; y <= imageWidth * (imageWidth - 1) ; y += imageWidth)
-  {
-    for (int x = imageWidth - 1 ; x >= 0 ; x--)
-    {
-      double dist = distData.distance_mm[x + y];
-      Serial.print("\t");
-      Serial.print(dist);
-      Serial.print(",");
-      if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
-        // === ST Lookup Table Method ===
-        // Compute sin/cos for ST-calibrated pitch/yaw angles
-        double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * PI/180;
-        double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * PI/180;
-        // Compute ST ray directions (normalized)
-        // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
-        // Negate X to match our lens-flip convention
-        double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // This division is done strangely in reference
-        double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
-        double st_ray_dir_z = 1;
-        //Point in Sensor's reference frame:
-        double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
-        //Point in GLOBAL reference frame:
-        Eigen::Quaternionf point_prime = Orientation * Eigen::Quaternionf(0, point[0], point[1], point[2]) * Orientation.conjugate();
-        newCloud[x+y] = {point_prime.x() + position[0], point_prime.y() + position[1], point_prime.z() + position[2]}; //Quaternion + position
-        pdist[x+y] = dist;
-      } else {
-        for (int i = 0; i < 3; i++){
-          newCloud[x+y][i] = 0; //Used to signify untrustable data
-          //TODO: Do this without it thinking it found matching points at the origin
-        }
-      }
-    }
-  }
-  Serial.println();
-}
-
-void setup()
-{
-  for (int i = 0; i < 64; i++) {
-    pdist[i] = 0.0;
-  }
-  delay(20);
-  // Led.
-  pinMode(LED_BUILTIN, OUTPUT);
-
-  // Initialize serial for output.
-  SerialPort.begin(115200);
-  delay(300);
-  SerialPort.write("Setting up...");
-
-  // Initialize I2C bus.
-  DEV_I2C.begin();
-  AccGyr.begin();
-  AccGyr.Enable_X();
-  AccGyr.Enable_G();
-  AccGyr.Set_G_FS(500);
-  AccGyr.Set_X_FS(8);
-  delay(20);
-
-  Wire.begin(); //This resets to 100kHz I2C
-  Wire.setClock(400000); //Sensor has max I2C freq of 400kHz 
-  Serial.println("Initializing sensor board. This can take up to 10s. Please wait.");
-  if (ToF.begin() == false)
-  {
-    Serial.println(F("ToF Sensor not found - check your wiring. Freezing"));
-    while (1) ;
-  }
-  ToF.setSharpenerPercent(ToF_Sharpness);
-
-  ToF.setResolution(8*8); //Enable all 64 pads
-  ToF.setRangingFrequency(15);
-  imageWidth = sqrt(ToF.getResolution()); //Calculate printing width
-  ToF.startRanging();
-  dump_mem_usage();
-}
 
 Eigen::Quaternionf Orientation(1.0, 0.0, 0.0, 0.0);
 Eigen::Vector3d velocity(0.0, 0.0, 0.0);
@@ -210,8 +131,85 @@ PointCloud<float> cloud;
 using my_kd_tree_t = nanoflann::KDTreeSingleIndexDynamicAdaptor<
         nanoflann::L2_Simple_Adaptor<float, PointCloud<float>>, PointCloud<float>, 3 /* dim */
         >;
-my_kd_tree_t index(3, cloud, max_leaf);
+my_kd_tree_t tree_index(3, cloud, max_leaf);
 // Cannot call functions at top level to add points
+
+void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3f, 64>& newCloud, std::array<boolean, 64>& hasData) {
+  //The ST library returns the data transposed from zone mapping shown in datasheet
+  //Pretty-print data with increasing y, decreasing x to reflect reality
+  for (int y = 0 ; y <= imageWidth * (imageWidth - 1) ; y += imageWidth)
+  {
+    for (int x = imageWidth - 1 ; x >= 0 ; x--)
+    {
+      double dist = distData.distance_mm[x + y];
+      Serial.print("\t");
+      Serial.print(dist);
+      Serial.print(",");
+      if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
+        // === ST Lookup Table Method ===
+        // Compute sin/cos for ST-calibrated pitch/yaw angles
+        double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * PI/180;
+        double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * PI/180;
+        // Compute ST ray directions (normalized)
+        // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
+        // Negate X to match our lens-flip convention
+        double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // This division is done strangely in reference
+        double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
+        double st_ray_dir_z = 1;
+        //Point in Sensor's reference frame:
+        double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
+        //Point in GLOBAL reference frame:
+        Eigen::Quaternionf point_prime = Orientation * Eigen::Quaternionf(0, point[0], point[1], point[2]) * Orientation.conjugate();
+        newCloud[x+y] = {point_prime.x() + position[0], point_prime.y() + position[1], point_prime.z() + position[2]}; //Quaternion + position
+        pdist[x+y] = dist;
+        hasData[x+y] = true;
+      } else {
+        hasData[x+y] = false;
+      }
+    }
+  }
+  Serial.println();
+}
+
+void setup()
+{
+  for (int i = 0; i < 64; i++) {
+    pdist[i] = 0.0;
+  }
+  delay(20);
+  // Led.
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  // Initialize serial for output.
+  SerialPort.begin(115200);
+  delay(300);
+  SerialPort.write("Setting up...");
+
+  // Initialize I2C bus.
+  DEV_I2C.begin();
+  AccGyr.begin();
+  AccGyr.Enable_X();
+  AccGyr.Enable_G();
+  AccGyr.Set_G_FS(500);
+  AccGyr.Set_X_FS(8);
+  delay(20);
+
+  Wire.begin(); //This resets to 100kHz I2C
+  Wire.setClock(400000); //Sensor has max I2C freq of 400kHz 
+  Serial.println("Initializing sensor board. This can take up to 10s. Please wait.");
+  if (ToF.begin() == false)
+  {
+    Serial.println(F("ToF Sensor not found - check your wiring. Freezing"));
+    while (1) ;
+  }
+  ToF.setSharpenerPercent(ToF_Sharpness);
+
+  ToF.setResolution(8*8); //Enable all 64 pads
+  ToF.setRangingFrequency(15);
+  imageWidth = sqrt(ToF.getResolution()); //Calculate printing width
+  ToF.startRanging();
+  dump_mem_usage();
+}
 
 void loop()
 {
@@ -277,53 +275,54 @@ void loop()
   // Distance Sensor Output (Populating newCloud)
   if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //Read distance data into array
     std::array<Eigen::Vector3f, 64> newCloud;
-    interpretDistances(distData, newCloud);
+    std::array<boolean, 64> hasData;
+    interpretDistances(distData, newCloud, hasData);
     //ICP
     for (int i = 0; i < ICP_Iterations; i++){
       Eigen::MatrixXf A = Eigen::MatrixXf::Zero(0, 6);
       Eigen::VectorXf b = Eigen::VectorXf::Zero(0);
       for (int point = 0; point < 64; point++){ //Iterate over every point
-        //TODO: Handle bad point case
-        //HERE IS WHERE TO FIND OPTIMIZATIONS
-        //Search kd tree to find closest point
-        const size_t num_results = 3;
-        nanoflann::KNNResultSet<float> resultSet(num_results);
-        size_t ret_index[num_results];
-        float out_dist_sqr[num_results]; //Square of distance
-        resultSet.init(ret_index, out_dist_sqr);
-        double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
-        index.findNeighbors(resultSet, newCloud[point].data(), {});
-        if(ret_index != NULL) { //If no points are found, the KD tree is empty and iterations are skipped (Doing this inside the loop causes negligible performance penalty)
-          if (out_dist_sqr[0] <= filter_distance^2) { // For filtering, the closest point needs to be relatively close
-            //PQ = cloud.pts[ret_index[0]] - cloud.pts[ret_index[1]]
-            //PR = cloud.pts[ret_index[0]] - cloud.pts[ret_index[2]]
-            //Normal vector is cross product
-            PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
-            PointCloud<float>::Point pt2 = cloud.pts[ret_index[1]];
-            PointCloud<float>::Point pt3 = cloud.pts[ret_index[2]];
-            float a_1 = pt1.x - pt2.x;
-            float a_2 = pt1.y - pt2.y;
-            float a_3 = pt1.z - pt2.z;
-            float b_1 = pt1.x - pt3.x;
-            float b_2 = pt1.y - pt3.y;
-            float b_3 = pt1.z - pt3.z;
-            float nx = (a_2 * b_3) - (a_3 * b_2); // normal vector values
-            float ny = (a_3 * b_1) - (a_1 * b_3);
-            float nz = (a_1 * b_2) - (a_2 * b_1);
-            //This can be any scale, because increasing the scale scales up A and b, which is cancelled at Eigen::pseudoInverse(A)*b.
-            float dx = pt1.x;
-            float dy = pt1.y;
-            float dz = pt1.z;
-            float sx = newCloud[point][0];
-            float sy = newCloud[point][1];
-            float sz = newCloud[point][2];
-            Eigen::VectorXf row;
-            row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
-            float value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
-            A.conservativeResize(A.rows() + 1, A.cols());
-            A.row(A.rows() - 1) = row;
-            b.conservativeResize(b.size() + 1);
-            b(b.size() - 1) = value;
+        if (hasData[point]) {
+          //HERE IS WHERE TO FIND COMPUTE CYCLE OPTIMIZATIONS
+          //Search kd tree to find closest point
+          const size_t num_results = 3;
+          nanoflann::KNNResultSet<float> resultSet(num_results);
+          size_t ret_index[num_results];
+          float out_dist_sqr[num_results]; //Square of distance
+          resultSet.init(ret_index, out_dist_sqr);
+          double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
+          tree_index.findNeighbors(resultSet, newCloud[point].data(), {});
+          if(ret_index != NULL) { //If no points are found, the KD tree is empty and iterations are skipped (Doing this inside the loop causes negligible performance penalty)
+            if (out_dist_sqr[0] <= filter_distance^2) { // For filtering, the closest point needs to be relatively close
+              //Normal vector is cross product of two vectors between points on the plane
+              PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
+              PointCloud<float>::Point pt2 = cloud.pts[ret_index[1]];
+              PointCloud<float>::Point pt3 = cloud.pts[ret_index[2]];
+              //Eigen::Vector3f point1 = {pt1.x, pt1.y, pt1.z};
+              float a_1 = pt1.x - pt2.x;
+              float a_2 = pt1.y - pt2.y;
+              float a_3 = pt1.z - pt2.z;
+              float b_1 = pt1.x - pt3.x;
+              float b_2 = pt1.y - pt3.y;
+              float b_3 = pt1.z - pt3.z;
+              float nx = (a_2 * b_3) - (a_3 * b_2); // normal vector values
+              float ny = (a_3 * b_1) - (a_1 * b_3);
+              float nz = (a_1 * b_2) - (a_2 * b_1);
+              //This can be any scale, because increasing the scale scales up A and b, which is cancelled at Eigen::pseudoInverse(A)*b.
+              float dx = pt1.x;
+              float dy = pt1.y;
+              float dz = pt1.z;
+              float sx = newCloud[point][0];
+              float sy = newCloud[point][1];
+              float sz = newCloud[point][2];
+              Eigen::VectorXf row;
+              row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
+              float value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
+              A.conservativeResize(A.rows() + 1, A.cols());
+              A.row(A.rows() - 1) = row;
+              b.conservativeResize(b.size() + 1);
+              b(b.size() - 1) = value;
+            }
           }
         }
       }
@@ -345,8 +344,9 @@ void loop()
       velocity += delta/(2*elapsedTime);
       //Apply optimal transformation to newCloud
       for(int point = 0; point < 64; point++) {
-        //TODO: Handle bad point case
-        newCloud[point] = transform * newCloud[point];
+        if (hasData[point]) {
+          newCloud[point] = transform * newCloud[point];
+        }
       }
     }
     //All ICP iterations completed, newCloud now has points that line up with previous points
@@ -354,22 +354,23 @@ void loop()
     size_t old_size = cloud.kdtree_get_point_count();
     SerialPort.print("NewPts"); //Start point data transfer to computer
     for(int point = 0; point < 64; point++) {
-      //TODO: handle bad point case
-      //Add point to cloud
-      cloud.pts[old_size + point] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
-      //Send point to be displayed
-      SerialPort.print(",");
-      SerialPort.print(newCloud[point][0]);
-      SerialPort.print(",");
-      SerialPort.print(newCloud[point][1]);
-      SerialPort.print(",");
-      SerialPort.print(newCloud[point][2]);
+      if (hasData[point]) {
+        //Add point to cloud
+        cloud.pts[old_size + point] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
+        //Send point to be displayed
+        SerialPort.print(",");
+        SerialPort.print(newCloud[point][0]);
+        SerialPort.print(",");
+        SerialPort.print(newCloud[point][1]);
+        SerialPort.print(",");
+        SerialPort.print(newCloud[point][2]);
+      }
     }
-    SerialPort.println(); //Space to new line
+    SerialPort.println(); //End point data transfer to computer
     size_t new_size = cloud.kdtree_get_point_count();
     //Add new points to index
-    //O(n) because tree is reformed after each chunk, luckily only done 15Hz not 15*64Hz
-    index.addPoints(old_size, new_size - 1);
+    //This is the only O(n) part because tree is reformed after each chunk, luckily only done 15Hz not 15*64Hz
+    tree_index.addPoints(old_size, new_size - 1);
     //TODO: Loop Closure/RANSAC?
     dump_mem_usage();
   }
