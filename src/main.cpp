@@ -1,7 +1,6 @@
-#include <Arduino.h>
-#include <cmath>
-#include <vector>
 #include <nanoflann.hpp>
+#include <Arduino.h>
+#include <vector>
 #include <iostream>
 #include <ctime>
 #include <cstdlib>
@@ -72,7 +71,7 @@ boolean newData = false;
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
 
 
-Eigen::Quaternionf Orientation(1.0, 0.0, 0.0, 0.0);
+Eigen::Quaterniond Orientation(1.0, 0.0, 0.0, 0.0);
 Eigen::Vector3d velocity(0.0, 0.0, 0.0);
 Eigen::Vector3d position(0.0, 0.0, 0.0);
 //From utils.h, gives definition of PointCloud that can be used to initialize a kd tree
@@ -148,8 +147,8 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
       if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
-        double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * PI/180;
-        double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * PI/180;
+        double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * DEG_TO_RAD;
+        double yaw_rad = ST_YAW_ANGLES_DEG[63-(x+y)] * DEG_TO_RAD;
         // Compute ST ray directions (normalized)
         // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
         // Negate X to match our lens-flip convention
@@ -159,8 +158,8 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
         //Point in Sensor's reference frame:
         double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
         //Point in GLOBAL reference frame:
-        Eigen::Quaternionf point_prime = Orientation * Eigen::Quaternionf(0, point[0], point[1], point[2]) * Orientation.conjugate();
-        newCloud[x+y] = {point_prime.x() + position[0], point_prime.y() + position[1], point_prime.z() + position[2]}; //Quaternion + position
+        Eigen::Quaternionf point_prime = (Orientation * Eigen::Quaterniond(0, point[0], point[1], point[2]) * Orientation.conjugate()).cast<float>();
+        newCloud[x+y] = {point_prime.x() + float(position[0]), point_prime.y() + float(position[1]), point_prime.z() + float(position[2])}; //Quaternion + position
         pdist[x+y] = dist;
         hasData[x+y] = true;
       } else {
@@ -240,12 +239,12 @@ void loop()
   elapsedTime = double(endTime - startTime)/1000000.0; //seconds
   startTime = micros();
   for (int i = 0; i < microsteps; i++) { //Apply quaternions evenly through several steps
-    Orientation *= Eigen::Quaternionf(cos(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), sin(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), 0, 0);
-    Orientation *= Eigen::Quaternionf(cos(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0, sin(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0);
-    Orientation *= Eigen::Quaternionf(cos(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)), 0, 0, sin(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)));
+    Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), sin(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), 0, 0);
+    Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0, sin(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0);
+    Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)), 0, 0, sin(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)));
   }
   Orientation.normalize(); //I am betting this will decrease weird bugs
-  Eigen::Quaternionf trueAcceleration = (Orientation * Eigen::Quaternionf(0, float(accelerometer[0]), float(accelerometer[1]), float(accelerometer[2])) * Orientation.conjugate());
+  Eigen::Quaterniond trueAcceleration = (Orientation * Eigen::Quaterniond(0, float(accelerometer[0]), float(accelerometer[1]), float(accelerometer[2])) * Orientation.conjugate());
   //From milliGs to m/s^2
   trueAccel.x() = trueAcceleration.x() * 9.8/1000.0;
   trueAccel.y() = trueAcceleration.y() * 9.8/1000.0;
@@ -279,8 +278,8 @@ void loop()
     interpretDistances(distData, newCloud, hasData);
     //ICP
     for (int i = 0; i < ICP_Iterations; i++){
-      Eigen::MatrixXf A = Eigen::MatrixXf::Zero(0, 6);
-      Eigen::VectorXf b = Eigen::VectorXf::Zero(0);
+      Eigen::MatrixXd A = Eigen::MatrixXd::Zero(0, 6);
+      Eigen::VectorXd b = Eigen::VectorXd::Zero(0);
       for (int point = 0; point < 64; point++){ //Iterate over every point
         if (hasData[point]) {
           //HERE IS WHERE TO FIND COMPUTE CYCLE OPTIMIZATIONS
@@ -315,9 +314,9 @@ void loop()
               float sx = newCloud[point][0];
               float sy = newCloud[point][1];
               float sz = newCloud[point][2];
-              Eigen::VectorXf row;
+              Eigen::VectorXd row;
               row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
-              float value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
+              double value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
               A.conservativeResize(A.rows() + 1, A.cols());
               A.row(A.rows() - 1) = row;
               b.conservativeResize(b.size() + 1);
@@ -332,7 +331,7 @@ void loop()
       //Turn x_opt into the 4x4 matrix transform it optimized for
       Eigen::Matrix4d transform_opt;
       transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
-      Eigen::Quaternionf transform_quat(transform_opt.topLeftCorner<3,3>());
+      Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
       Eigen::Transform<double, 3, Eigen::Affine> transform(transform_opt); //Can be applied directly to 3d vectors now
       //Rather than applying the euler angles, this allows us to only apply the transformation that was optimized for, not what it pretends to be
       //Apply optimal transformation to sensor quaternion
@@ -345,7 +344,7 @@ void loop()
       //Apply optimal transformation to newCloud
       for(int point = 0; point < 64; point++) {
         if (hasData[point]) {
-          newCloud[point] = transform * newCloud[point];
+          newCloud[point] = transform.cast<float>() * newCloud[point];
         }
       }
     }
