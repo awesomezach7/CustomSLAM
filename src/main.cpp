@@ -314,7 +314,7 @@ void loop()
               float sx = newCloud[point][0];
               float sy = newCloud[point][1];
               float sz = newCloud[point][2];
-              Eigen::VectorXd row;
+              Eigen::VectorXd row(6); //Without (6), this has a runtime CommaInitializer error
               row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
               double value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
               A.conservativeResize(A.rows() + 1, A.cols());
