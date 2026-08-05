@@ -141,9 +141,6 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
     for (int x = imageWidth - 1 ; x >= 0 ; x--)
     {
       double dist = distData.distance_mm[x + y];
-      Serial.print("\t");
-      Serial.print(dist);
-      Serial.print(",");
       if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
@@ -167,7 +164,7 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
       }
     }
   }
-  Serial.println();
+  SerialPort.println("Distances Interpreted");
 }
 
 void setup()
@@ -202,7 +199,6 @@ void setup()
     while (1) ;
   }
   ToF.setSharpenerPercent(ToF_Sharpness);
-
   ToF.setResolution(8*8); //Enable all 64 pads
   ToF.setRangingFrequency(15);
   imageWidth = sqrt(ToF.getResolution()); //Calculate printing width
@@ -255,21 +251,15 @@ void loop()
     position[i] += velocity[i] * elapsedTime;
   }
   // Output data.
-  SerialPort.print("Orientation,");
-  SerialPort.print(Orientation.w());
+  String orientationEstimate = "Orientation,"+String(Orientation.w())+","+String(Orientation.x())+","+String(Orientation.y())+","+String(Orientation.z());
+  SerialPort.print(orientationEstimate);
   SerialPort.print(",");
-  SerialPort.print(Orientation.x());
+  String positionEstimate = "Position,"+String(position[0])+","+String(position[1])+","+String(position[2]);
+  SerialPort.print(positionEstimate);
   SerialPort.print(",");
-  SerialPort.print(Orientation.y());
-  SerialPort.print(",");
-  SerialPort.print(Orientation.z());
-  SerialPort.print(",");
-  SerialPort.print("Position,");
-  SerialPort.print(position[0]);
-  SerialPort.print(",");
-  SerialPort.print(position[1]);
-  SerialPort.print(",");
-  SerialPort.println(position[2]);
+  String velocityEstimate = "Velocity,"+String(velocity[0])+","+String(velocity[1])+","+String(velocity[2]);
+  SerialPort.print(velocityEstimate);
+  SerialPort.println();
   // SLAM Core
   // Distance Sensor Output (Populating newCloud)
   if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //Read distance data into array
@@ -278,6 +268,7 @@ void loop()
     interpretDistances(distData, newCloud, hasData);
     //ICP
     for (int i = 0; i < ICP_Iterations; i++){
+      SerialPort.println("Beginning ICP Iterations");
       Eigen::MatrixXd A = Eigen::MatrixXd::Zero(0, 6);
       Eigen::VectorXd b = Eigen::VectorXd::Zero(0);
       for (int point = 0; point < 64; point++){ //Iterate over every point
@@ -292,6 +283,7 @@ void loop()
           double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
           tree_index.findNeighbors(resultSet, newCloud[point].data(), {});
           if(ret_index != NULL) { //If no points are found, the KD tree is empty and iterations are skipped (Doing this inside the loop causes negligible performance penalty)
+            SerialPort.println("closest point index," + String(ret_index[0]));
             if (out_dist_sqr[0] <= filter_distance^2) { // For filtering, the closest point needs to be relatively close
               //Normal vector is cross product of two vectors between points on the plane
               PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
