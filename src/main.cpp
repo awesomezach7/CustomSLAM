@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include <ArduinoEigen.h>
 
-// Includes
 #include <LSM6DSO32Sensor.h>
 
 #ifdef ARDUINO_SAM_DUE
@@ -20,13 +19,11 @@
 #endif
 #define SerialPort Serial
 
-//Calibration offsets:
-const double accoffset[3] = {36.8,-2.87,-36.5};
-const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 // Components
 LSM6DSO32Sensor AccGyr(&DEV_I2C);
 
 unsigned long startTime = micros();
+bool firstLoop = true;
 unsigned long endTime = micros();
 double elapsedTime = endTime - startTime;
 
@@ -66,8 +63,10 @@ boolean newData = false;
 #define ToF_Sharpness 20
 #define microsteps 15
 #define max_leaf 12
-#define ICP_Iterations 15
+#define ICP_Iterations 6
 #define filter_distance 0.4
+const double accoffset[3] = {36.8,-2.87,-36.5};
+const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
 
 
@@ -141,7 +140,7 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
     for (int x = imageWidth - 1 ; x >= 0 ; x--)
     {
       double dist = distData.distance_mm[x + y];
-      if (pdist[x+y] != dist){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
+      if (pdist[x+y] != dist && dist != 0){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
         double pitch_rad = ST_PITCH_ANGLES_DEG[63-(x+y)] * DEG_TO_RAD;
@@ -153,7 +152,7 @@ void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3
         double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
         double st_ray_dir_z = 1;
         //Point in Sensor's reference frame:
-        double point[3] = {st_ray_dir_y * dist, st_ray_dir_x * dist, st_ray_dir_z * dist};
+        double point[3] = {st_ray_dir_y * dist/1000, st_ray_dir_x * dist/1000, st_ray_dir_z * dist/1000}; // divide by 1000 to convert mm to meters
         //Point in GLOBAL reference frame:
         Eigen::Quaternionf point_prime = (Orientation * Eigen::Quaterniond(0, point[0], point[1], point[2]) * Orientation.conjugate()).cast<float>();
         newCloud[x+y] = {point_prime.x() + float(position[0]), point_prime.y() + float(position[1]), point_prime.z() + float(position[2])}; //Quaternion + position
@@ -231,6 +230,7 @@ void loop()
     accelerometer[i] += accoffset[i];
     gyroscope[i] += gyrooffset[i];
   }
+  if (firstLoop) {firstLoop = false; startTime = micros();}
   endTime = micros();
   elapsedTime = double(endTime - startTime)/1000000.0; //seconds
   startTime = micros();
@@ -244,22 +244,26 @@ void loop()
   //From milliGs to m/s^2
   trueAccel.x() = trueAcceleration.x() * 9.8/1000.0;
   trueAccel.y() = trueAcceleration.y() * 9.8/1000.0;
-  trueAccel.z() = trueAcceleration.z() * 9.8/1000.0;
+  trueAccel.z() = (trueAcceleration.z() * 9.8/1000.0) - 9.8;
   for(int i = 0; i < 3; i++) {
     //Double integration step (Not messing with trapezoids, ICP should fix anyways)
     velocity[i] += trueAccel[i] * elapsedTime;
     position[i] += velocity[i] * elapsedTime;
   }
   // Output data.
-  String orientationEstimate = "Orientation,"+String(Orientation.w())+","+String(Orientation.x())+","+String(Orientation.y())+","+String(Orientation.z());
+  String orientationEstimate = "Orient, "+String(Orientation.w())+", "+String(Orientation.x())+", "+String(Orientation.y())+", "+String(Orientation.z());
   SerialPort.print(orientationEstimate);
-  SerialPort.print(",");
-  String positionEstimate = "Position,"+String(position[0])+","+String(position[1])+","+String(position[2]);
+  SerialPort.print(", ");
+  String positionEstimate = "Pos, "+String(position[0])+", "+String(position[1])+", "+String(position[2]);
   SerialPort.print(positionEstimate);
-  SerialPort.print(",");
-  String velocityEstimate = "Velocity,"+String(velocity[0])+","+String(velocity[1])+","+String(velocity[2]);
+  SerialPort.print(", ");
+  String velocityEstimate = "Vel, "+String(velocity[0])+", "+String(velocity[1])+", "+String(velocity[2]);
   SerialPort.print(velocityEstimate);
+  SerialPort.print(", Time = " + String(elapsedTime * 1000) + " ms");
   SerialPort.println();
+
+
+
   // SLAM Core
   // Distance Sensor Output (Populating newCloud)
   if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //Read distance data into array
@@ -267,24 +271,27 @@ void loop()
     std::array<boolean, 64> hasData;
     interpretDistances(distData, newCloud, hasData);
     //ICP
-    for (int i = 0; i < ICP_Iterations; i++){
-      SerialPort.println("Beginning ICP Iterations");
-      Eigen::MatrixXd A = Eigen::MatrixXd::Zero(0, 6);
-      Eigen::VectorXd b = Eigen::VectorXd::Zero(0);
-      for (int point = 0; point < 64; point++){ //Iterate over every point
-        if (hasData[point]) {
-          //HERE IS WHERE TO FIND COMPUTE CYCLE OPTIMIZATIONS
-          //Search kd tree to find closest point
-          const size_t num_results = 3;
-          nanoflann::KNNResultSet<float> resultSet(num_results);
-          size_t ret_index[num_results];
-          float out_dist_sqr[num_results]; //Square of distance
-          resultSet.init(ret_index, out_dist_sqr);
-          double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
-          tree_index.findNeighbors(resultSet, newCloud[point].data(), {});
-          if(ret_index != NULL) { //If no points are found, the KD tree is empty and iterations are skipped (Doing this inside the loop causes negligible performance penalty)
-            SerialPort.println("closest point index," + String(ret_index[0]));
+    if (cloud.pts.empty()){
+
+    } else {
+      for (int i = 0; i < ICP_Iterations; i++){
+        SerialPort.println("Beginning ICP Iterations");
+        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(64, 6);
+        Eigen::VectorXd b = Eigen::VectorXd::Zero(64);
+        int n = 0;
+        for (int point = 0; point < 64; point++){ //Iterate over every point
+          if (hasData[point]) {
+            //HERE IS WHERE TO FIND COMPUTE CYCLE OPTIMIZATIONS
+            //Search kd tree to find closest point
+            const size_t num_results = 3;
+            nanoflann::KNNResultSet<float> resultSet(num_results);
+            size_t ret_index[num_results];
+            float out_dist_sqr[num_results]; //Square of distance
+            resultSet.init(ret_index, out_dist_sqr);
+            double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
+            tree_index.findNeighbors(resultSet, newCloud[point].data(), {});
             if (out_dist_sqr[0] <= filter_distance^2) { // For filtering, the closest point needs to be relatively close
+              n++;
               //Normal vector is cross product of two vectors between points on the plane
               PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
               PointCloud<float>::Point pt2 = cloud.pts[ret_index[1]];
@@ -309,45 +316,52 @@ void loop()
               Eigen::VectorXd row(6); //Without (6), this has a runtime CommaInitializer error
               row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
               double value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
-              A.conservativeResize(A.rows() + 1, A.cols());
-              A.row(A.rows() - 1) = row;
-              b.conservativeResize(b.size() + 1);
-              b(b.size() - 1) = value;
+              A.row(n - 1) = row;
+              b(n - 1) = value;
             }
           }
         }
-      }
-      Eigen::VectorXd x_opt = Eigen::pseudoInverse(A)*b;
-      //x_opt is a "vector" starting with euler angles, then translational position, centered at (0, 0, 0)
-      //It must be applied to both the sensor position and newCloud
-      //Turn x_opt into the 4x4 matrix transform it optimized for
-      Eigen::Matrix4d transform_opt;
-      transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
-      Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
-      Eigen::Transform<double, 3, Eigen::Affine> transform(transform_opt); //Can be applied directly to 3d vectors now
-      //Rather than applying the euler angles, this allows us to only apply the transformation that was optimized for, not what it pretends to be
-      //Apply optimal transformation to sensor quaternion
-      Orientation *= transform_quat;
-      //Apply optimal transformation to sensor position (same as pointcloud)
-      Eigen::Vector3d delta = transform * position - position;
-      position = transform * position;
-      //Update velocity (drag towards new value at 1/2 ratio)
-      velocity += delta/(2*elapsedTime);
-      //Apply optimal transformation to newCloud
-      for(int point = 0; point < 64; point++) {
-        if (hasData[point]) {
-          newCloud[point] = transform.cast<float>() * newCloud[point];
+        SerialPort.println("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
+        Eigen::Matrix4d transform_opt;
+        if (A.rows() == 0 || A.cols() == 0){
+          //Cannot run pseudoInverse, revert to using identity matrix
+          transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0;
+        } else {
+          //Free extra size of MatrixXd based on final value of n
+          A.conservativeResize(n, 6);
+          b.conservativeResize(n);
+          Eigen::VectorXd x_opt = Eigen::pseudoInverse(A)*b;
+          //x_opt is a "vector" starting with euler angles, then translational position, centered at (0, 0, 0)
+          //It must be applied to both the sensor position and newCloud
+          //Turn x_opt into the 4x4 matrix transform it optimized for
+          transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
+        }
+        Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
+        Eigen::Transform<double, 3, Eigen::Affine> transform(transform_opt); //Can be applied directly to 3d vectors now
+        //Rather than applying the euler angles, this allows us to only apply the transformation that was optimized for, not what it pretends to be
+        //Apply optimal transformation to sensor quaternion
+        Orientation *= transform_quat;
+        //Apply optimal transformation to sensor position (same as pointcloud)
+        Eigen::Vector3d delta = transform * position - position;
+        position = transform * position;
+        //Update velocity (drag towards new value at 1/2 ratio)
+        velocity += delta/(2*elapsedTime);
+        //Apply optimal transformation to newCloud
+        for(int point = 0; point < 64; point++) {
+          if (hasData[point]) {
+            newCloud[point] = transform.cast<float>() * newCloud[point];
+          }
         }
       }
     }
-    //All ICP iterations completed, newCloud now has points that line up with previous points
+    //All ICP iterations completed, newCloud now has points that line up with previous points (Or nothing happened if cloud.pts.empty())
     //Update Kd Tree
     size_t old_size = cloud.kdtree_get_point_count();
     SerialPort.print("NewPts"); //Start point data transfer to computer
     for(int point = 0; point < 64; point++) {
       if (hasData[point]) {
         //Add point to cloud
-        cloud.pts[old_size + point] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
+        cloud.pts.push_back({newCloud[point][0], newCloud[point][1], newCloud[point][2]});
         //Send point to be displayed
         SerialPort.print(",");
         SerialPort.print(newCloud[point][0]);
