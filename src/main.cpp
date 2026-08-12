@@ -89,7 +89,7 @@ boolean newData = false;
 #define max_leaf 12
 #define ICP_Iterations 3
 #define filter_distance 0.4
-#define VELOCITY_FILTER_RATIO 0.5
+#define VELOCITY_FILTER_RATIO 0.1
 const double accoffset[3] = {36.8,-2.87,-36.5};
 const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
@@ -359,11 +359,12 @@ static void runICP(void * pvParameters){
         if (hasData[point]) {
           //Add point to cloud
           cloud.pts.push_back({newCloud[point][0], newCloud[point][1], newCloud[point][2]});
-          //Send point to be displayed
+          //Send point data
           pointMsg += "," + String(newCloud[point][0]) + "," + String(newCloud[point][1]) + "," + String(newCloud[point][2]);
         }
       }
-      serial_write(pointMsg);
+      serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
+      //TODO: also fix watchdog issues
       size_t new_size = cloud.kdtree_get_point_count();
       //Add new points to index
       //This is the only O(n) part because tree is reformed after each chunk, luckily only done 15Hz not 15*64Hz
