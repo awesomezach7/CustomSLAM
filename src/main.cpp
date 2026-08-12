@@ -54,6 +54,7 @@ double elapsedTimeICP = endTimeICP - startTimeICP;
 SparkFun_VL53L5CX ToF;
 VL53L5CX_ResultsData distData; // Result data class structure, 1356 byes of RAM
 static SemaphoreHandle_t xCoreSyncSemaphore;
+static SemaphoreHandle_t inertialDataMutex;
 
 int imageWidth = 0; //Used to pretty print output
 
@@ -158,6 +159,7 @@ my_kd_tree_t tree_index(3, cloud, max_leaf);
 
 static void I2CIntegrator(void * pvParameters) {
   for(;;) {
+    delay(3);
     //IO Core
     if ((millis() / 1000) % 2 == 0) {
       digitalWrite(LED_BUILTIN, HIGH);
@@ -185,33 +187,34 @@ static void I2CIntegrator(void * pvParameters) {
     endTime = micros();
     elapsedTime = double(endTime - startTime)/1000000.0; //seconds
     startTime = micros();
+    xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
     for (int i = 0; i < microsteps; i++) { //Apply quaternions evenly through several steps
       Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), sin(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), 0, 0);
       Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0, sin(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0);
       Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)), 0, 0, sin(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)));
     }
     Orientation.normalize(); //I am betting this will decrease weird bugs
+    xSemaphoreGive(inertialDataMutex);
     Eigen::Quaterniond trueAcceleration = (Orientation * Eigen::Quaterniond(0, float(accelerometer[0]), float(accelerometer[1]), float(accelerometer[2])) * Orientation.conjugate());
     //From milliGs to m/s^2
     trueAccel.x() = trueAcceleration.x() * 9.8/1000.0;
     trueAccel.y() = trueAcceleration.y() * 9.8/1000.0;
     trueAccel.z() = (trueAcceleration.z() * 9.8/1000.0) - 9.8;
+    xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
     for(int i = 0; i < 3; i++) {
       //Double integration step (Not messing with trapezoids, ICP should fix anyways)
       velocity[i] += trueAccel[i] * elapsedTime;
       position[i] += velocity[i] * elapsedTime;
     }
+    xSemaphoreGive(inertialDataMutex);
     // Output data.
     String orientationEstimate = "Orient, "+String(Orientation.w())+", "+String(Orientation.x())+", "+String(Orientation.y())+", "+String(Orientation.z());
     String positionEstimate = "Pos, "+String(position[0])+", "+String(position[1])+", "+String(position[2]);
     String velocityEstimate = "Vel, "+String(velocity[0])+", "+String(velocity[1])+", "+String(velocity[2]);
     String inertialUpdate = orientationEstimate + ", " + positionEstimate + ", " + velocityEstimate + ", Time = " + String(elapsedTime * 1000) + " ms";
     serial_write(inertialUpdate);
-    if (ToF.isDataReady() && ToF.getRangingData(&distData)){
+    if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //distData could have race conditions, but too rare to be worth it to fix
       xSemaphoreGive(xCoreSyncSemaphore);
-      serial_write("ICP ready");
-    } else {
-      serial_write("ICP not yet ready");
     }
   }
 }
@@ -238,8 +241,10 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
         //Point in Sensor's reference frame:
         double point[3] = {st_ray_dir_y * dist/1000, st_ray_dir_x * dist/1000, st_ray_dir_z * dist/1000}; // divide by 1000 to convert mm to meters
         //Point in GLOBAL reference frame:
+        xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
         Eigen::Quaternionf point_prime = (Orientation * Eigen::Quaterniond(0, point[0], point[1], point[2]) * Orientation.conjugate()).cast<float>();
         newCloud[x+y] = {point_prime.x() + float(position[0]), point_prime.y() + float(position[1]), point_prime.z() + float(position[2])}; //Quaternion + position
+        xSemaphoreGive(inertialDataMutex);
         pdist[x+y] = dist;
         hasData[x+y] = true;
       } else {
@@ -252,6 +257,7 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
 
 static void runICP(void * pvParameters){
   for(;;){
+    delay(1);//for watchdog
     // SLAM: Core 0
     // Distance Sensor Output (Populating newCloud)
     if (xSemaphoreTake(xCoreSyncSemaphore, portMAX_DELAY) == pdTRUE){ //distData is read by the other core so only 1 core accesses I2C
@@ -277,29 +283,21 @@ static void runICP(void * pvParameters){
               resultSet.init(ret_index, out_dist_sqr);
               double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
               tree_index.findNeighbors(resultSet, newCloud[point].data(), {});
-              if (out_dist_sqr[0] <= filter_distance^2) { // For filtering, the closest point needs to be relatively close
+              if (out_dist_sqr[0] <= filter_distance*filter_distance) { // For filtering, the closest point needs to be relatively close
                 n++;
                 //Normal vector is cross product of two vectors between points on the plane
                 PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
                 PointCloud<float>::Point pt2 = cloud.pts[ret_index[1]];
                 PointCloud<float>::Point pt3 = cloud.pts[ret_index[2]];
                 //Eigen::Vector3f point1 = {pt1.x, pt1.y, pt1.z};
-                float a_1 = pt1.x - pt2.x;
-                float a_2 = pt1.y - pt2.y;
-                float a_3 = pt1.z - pt2.z;
-                float b_1 = pt1.x - pt3.x;
-                float b_2 = pt1.y - pt3.y;
-                float b_3 = pt1.z - pt3.z;
+                float a_1 = pt1.x - pt2.x; float a_2 = pt1.y - pt2.y; float a_3 = pt1.z - pt2.z;
+                float b_1 = pt1.x - pt3.x; float b_2 = pt1.y - pt3.y; float b_3 = pt1.z - pt3.z;
                 float nx = (a_2 * b_3) - (a_3 * b_2); // normal vector values
                 float ny = (a_3 * b_1) - (a_1 * b_3);
                 float nz = (a_1 * b_2) - (a_2 * b_1);
                 //This can be any scale, because increasing the scale scales up A and b, which is cancelled at Eigen::pseudoInverse(A)*b.
-                float dx = pt1.x;
-                float dy = pt1.y;
-                float dz = pt1.z;
-                float sx = newCloud[point][0];
-                float sy = newCloud[point][1];
-                float sz = newCloud[point][2];
+                float dx = pt1.x; float dy = pt1.y; float dz = pt1.z;
+                float sx = newCloud[point][0]; float sy = newCloud[point][1]; float sz = newCloud[point][2];
                 Eigen::VectorXd row(6); //Without (6), this has a runtime CommaInitializer error
                 row << nz*sy - ny*sz, nx*sz - nz*sx, ny*sx - nx*sy, nx, ny, nz;
                 double value = nx*dx + ny*dy + nz*dz - nx*sx - ny*sy - nz*sz;
@@ -310,9 +308,9 @@ static void runICP(void * pvParameters){
           }
           serial_write("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
           Eigen::Matrix4d transform_opt;
-          if (A.rows() == 0 || A.cols() == 0){
+          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0){
             //Cannot run pseudoInverse, revert to using identity matrix
-            transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0;
+            transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1;
           } else {
             //Free extra size of MatrixXd based on final value of n
             A.conservativeResize(n, 6);
@@ -327,6 +325,7 @@ static void runICP(void * pvParameters){
           Eigen::Transform<double, 3, Eigen::Affine> transform(transform_opt); //Can be applied directly to 3d vectors now
           //Rather than applying the euler angles, this allows us to only apply the transformation that was optimized for, not what it pretends to be
           //Apply optimal transformation to sensor quaternion
+          xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
           Orientation *= transform_quat;
           //Apply optimal transformation to sensor position (same as pointcloud)
           Eigen::Vector3d delta = transform * position - position;
@@ -343,6 +342,7 @@ static void runICP(void * pvParameters){
             startTimeICP = micros();
           }
           velocity += delta * VELOCITY_FILTER_RATIO/elapsedTimeICP;
+          xSemaphoreGive(inertialDataMutex);
           //Apply optimal transformation to newCloud
           for(int point = 0; point < 64; point++) {
             if (hasData[point]) {
@@ -364,7 +364,6 @@ static void runICP(void * pvParameters){
         }
       }
       serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
-      //TODO: also fix watchdog issues
       size_t new_size = cloud.kdtree_get_point_count();
       //Add new points to index
       //This is the only O(n) part because tree is reformed after each chunk, luckily only done 15Hz not 15*64Hz
@@ -419,6 +418,7 @@ void setup()
   dump_mem_usage();
   delay(1);
   xCoreSyncSemaphore = xSemaphoreCreateBinary();
+  inertialDataMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(
     runICP,
     "Core0Task",
