@@ -171,7 +171,6 @@ static void I2CIntegrator(void * pvParameters) {
     int32_t gyro[3];
     double accelerometer[3];
     double gyroscope[3];
-    Eigen::Vector3d trueAccel(0.0, 0.0, 0.0);
     AccGyr.Get_X_Axes(acc);
     AccGyr.Get_G_Axes(gyro);
     //Subtract Sample sums
@@ -189,22 +188,21 @@ static void I2CIntegrator(void * pvParameters) {
     startTime = micros();
     xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
     for (int i = 0; i < microsteps; i++) { //Apply quaternions evenly through several steps
-      Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), sin(elapsedTime * (double(gyroscope[0])*PI)/(1000*180*2*microsteps)), 0, 0);
+      Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(-gyroscope[0])*PI)/(1000*180*2*microsteps)), sin(elapsedTime * (double(-gyroscope[0])*PI)/(1000*180*2*microsteps)), 0, 0);
       Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0, sin(elapsedTime * (double(gyroscope[1])*PI)/(1000*180*2*microsteps)), 0);
       Orientation *= Eigen::Quaterniond(cos(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)), 0, 0, sin(elapsedTime * (double(gyroscope[2])*PI)/(1000*180*2*microsteps)));
     }
-    Orientation.normalize(); //I am betting this will decrease weird bugs
+    Orientation.normalize();
     xSemaphoreGive(inertialDataMutex);
-    Eigen::Quaterniond trueAcceleration = (Orientation * Eigen::Quaterniond(0, float(accelerometer[0]), float(accelerometer[1]), float(accelerometer[2])) * Orientation.conjugate());
+    Eigen::Vector3d trueAccel(Orientation * Eigen::Vector3d(accelerometer[0], accelerometer[1], accelerometer[2]));
     //From milliGs to m/s^2
-    trueAccel.x() = trueAcceleration.x() * 9.8/1000.0;
-    trueAccel.y() = trueAcceleration.y() * 9.8/1000.0;
-    trueAccel.z() = (trueAcceleration.z() * 9.8/1000.0) - 9.8;
+    trueAccel *= 9.8/1000;
+    trueAccel[2] -= 9.8;
     xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
     for(int i = 0; i < 3; i++) {
       //Double integration step (Not messing with trapezoids, ICP should fix anyways)
-      velocity[i] += trueAccel[i] * elapsedTime;
-      position[i] += velocity[i] * elapsedTime;
+      //velocity[i] += trueAccel[i] * elapsedTime;
+      //position[i] += velocity[i] * elapsedTime;
     }
     xSemaphoreGive(inertialDataMutex);
     // Output data.
@@ -239,10 +237,10 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
         double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
         double st_ray_dir_z = 1;
         //Point in Sensor's reference frame:
-        double point[3] = {st_ray_dir_y * dist/1000, st_ray_dir_x * dist/1000, st_ray_dir_z * dist/1000}; // divide by 1000 to convert mm to meters
+        Eigen::Vector3d point = {st_ray_dir_y * dist/1000, st_ray_dir_x * dist/1000, st_ray_dir_z * dist/1000}; // divide by 1000 to convert mm to meters
         //Point in GLOBAL reference frame:
         xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
-        Eigen::Quaternionf point_prime = (Orientation * Eigen::Quaterniond(0, point[0], point[1], point[2]) * Orientation.conjugate()).cast<float>();
+        Eigen::Vector3f point_prime = (Orientation * point).cast<float>();
         newCloud[x+y] = {point_prime.x() + float(position[0]), point_prime.y() + float(position[1]), point_prime.z() + float(position[2])}; //Quaternion + position
         xSemaphoreGive(inertialDataMutex);
         pdist[x+y] = dist;

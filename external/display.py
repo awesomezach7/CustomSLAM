@@ -7,6 +7,7 @@ import viser
 import serial
 import serial.tools.list_ports
 import viser.transforms as tf
+import trimesh
 
 import math
 
@@ -23,6 +24,16 @@ scaleUp = 10
 
 def main():
     server = viser.ViserServer()
+    mesh = trimesh.load_mesh(str(Path(__file__).parent / "breadboard.obj"))
+    assert isinstance(mesh, trimesh.Trimesh)
+    mesh.apply_scale(0.05)
+    breadboard = server.scene.add_mesh_simple(
+        "/Breadboard",
+        vertices = mesh.vertices,
+        faces = mesh.faces,
+        wxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([0.0, 0.0, 0.0, 1.0])).wxyz,
+        position = (0, 0, 0)
+    )
     pointCloud = server.scene.add_point_cloud(
         "/Points",
         points = np.ndarray((0, 3)),
@@ -37,8 +48,15 @@ def main():
         Parsed = Input.split(",")
         if Parsed[0] == "NewPts":
             for i in range(1, int((len(Parsed)-1)/3)): # Start at 1 because 0th index is "NewPts"
-                allPoints = np.append(allPoints, [float(Parsed[3*i-2])*scaleUp, float(Parsed[3*i-1])*scaleUp, float(Parsed[3*i])*scaleUp])
-            pointCloud.points = allPoints
+                try:
+                    pointCloud.points = np.append(pointCloud.points, [float(Parsed[3*i-2])*scaleUp, float(Parsed[3*i-1])*scaleUp, float(Parsed[3*i])*scaleUp])
+                except ValueError:
+                    print("bad input")
+        elif Parsed[0] == "Orient":
+            try:
+                breadboard.wxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
+            except ValueError:
+                print("bad input")
 
 if __name__=="__main__":
     main()
