@@ -50,12 +50,13 @@ def main():
             for i in range(1, int((len(Parsed)-1)/3)): # Start at 1 because 0th index is "NewPts"
                 try:
                     pointCloud.points = np.append(pointCloud.points, [float(Parsed[3*i-2])*scaleUp, float(Parsed[3*i-1])*scaleUp, float(Parsed[3*i])*scaleUp])
-                except ValueError:
+                except ValueError, IndexError:
                     print("bad input")
         elif Parsed[0] == "Orient":
             try:
                 breadboard.wxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
-            except ValueError:
+                breadboard.position = (20*float(Parsed[6]), 20*float(Parsed[7]), 20*float(Parsed[8]))
+            except ValueError, IndexError:
                 print("bad input")
 
 if __name__=="__main__":

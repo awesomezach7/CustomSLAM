@@ -306,7 +306,7 @@ static void runICP(void * pvParameters){
           }
           serial_write("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
           Eigen::Matrix4d transform_opt;
-          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0){
+          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < 42){
             //Cannot run pseudoInverse, revert to using identity matrix
             transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1;
           } else {
@@ -314,13 +314,21 @@ static void runICP(void * pvParameters){
             A.conservativeResize(n, 6);
             b.conservativeResize(n);
             Eigen::VectorXd x_opt = Eigen::pseudoInverse(A)*b;
+            serial_write(String(x_opt[0]) + "," + String(x_opt[1]) + "," + String(x_opt[2]) + "," + String(x_opt[3]) + "," + String(x_opt[4]) + "," + String(x_opt[5]));
             //x_opt is a "vector" starting with euler angles, then translational position, centered at (0, 0, 0)
             //It must be applied to both the sensor position and newCloud
             //Turn x_opt into the 4x4 matrix transform it optimized for
             transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
+            //serial_write(String(x_opt(3)) + "," + String(x_opt(4)) + "," + String(x_opt(5)));
+            /* Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
+            Eigen::AngleAxisd angle_axis(transform_quat);
+            transform_quat = Eigen::Quaterniond(Eigen::AngleAxisd(angle_axis.angle() * trust, angle_axis.axis()));
+            transform_opt.topLeftCorner<3, 3>() = transform_quat.toRotationMatrix();
+            transform_opt.topRightCorner<3, 1>() *= trust; */
           }
           Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
           Eigen::Transform<double, 3, Eigen::Affine> transform(transform_opt); //Can be applied directly to 3d vectors now
+
           //Rather than applying the euler angles, this allows us to only apply the transformation that was optimized for, not what it pretends to be
           //Apply optimal transformation to sensor quaternion
           xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
