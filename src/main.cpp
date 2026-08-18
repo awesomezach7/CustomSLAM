@@ -54,6 +54,8 @@ double elapsedTimeICP = endTimeICP - startTimeICP;
 SparkFun_VL53L5CX ToF;
 VL53L5CX_ResultsData distData; // Result data class structure, 1356 byes of RAM
 static SemaphoreHandle_t xCoreSyncSemaphore;
+static SemaphoreHandle_t i2cAccessMutex;
+static SemaphoreHandle_t distDataMutex;
 static SemaphoreHandle_t inertialDataMutex;
 
 int imageWidth = 0; //Used to pretty print output
@@ -159,7 +161,7 @@ my_kd_tree_t tree_index(3, cloud, max_leaf);
 
 static void I2CIntegrator(void * pvParameters) {
   for(;;) {
-    delay(3);
+    vTaskDelay(1);
     //IO Core
     if ((millis() / 1000) % 2 == 0) {
       digitalWrite(LED_BUILTIN, HIGH);
@@ -171,8 +173,10 @@ static void I2CIntegrator(void * pvParameters) {
     int32_t gyro[3];
     double accelerometer[3];
     double gyroscope[3];
+    xSemaphoreTake(i2cAccessMutex, portMAX_DELAY); //This is the root cause of the slowdown
     AccGyr.Get_X_Axes(acc);
     AccGyr.Get_G_Axes(gyro);
+    xSemaphoreGive(i2cAccessMutex);
     //Subtract Sample sums
     for(int i = 0; i < 3; i++) {
       //Changing to better type
@@ -205,15 +209,28 @@ static void I2CIntegrator(void * pvParameters) {
       //position[i] += velocity[i] * elapsedTime;
     }
     xSemaphoreGive(inertialDataMutex);
+    vTaskDelay(1);
     // Output data.
     String orientationEstimate = "Orient, "+String(Orientation.w())+", "+String(Orientation.x())+", "+String(Orientation.y())+", "+String(Orientation.z());
     String positionEstimate = "Pos, "+String(position[0])+", "+String(position[1])+", "+String(position[2]);
     String velocityEstimate = "Vel, "+String(velocity[0])+", "+String(velocity[1])+", "+String(velocity[2]);
     String inertialUpdate = orientationEstimate + ", " + positionEstimate + ", " + velocityEstimate + ", Time = " + String(elapsedTime * 1000) + " ms";
     serial_write(inertialUpdate);
-    if (ToF.isDataReady() && ToF.getRangingData(&distData)){ //distData could have race conditions, but too rare to be worth it to fix
+  }
+}
+
+static void readToF(void * pvParameters) {
+  for (;;) {
+    vTaskDelay(1);
+    xSemaphoreTake(distDataMutex, portMAX_DELAY);
+    xSemaphoreTake(i2cAccessMutex, portMAX_DELAY);
+    if (ToF.isDataReady() && ToF.getRangingData(&distData)) {
+      ToF.getRangingData(&distData);
       xSemaphoreGive(xCoreSyncSemaphore);
+      serial_write("ToF Data read");
     }
+    xSemaphoreGive(i2cAccessMutex);
+    xSemaphoreGive(distDataMutex);
   }
 }
 
@@ -255,13 +272,15 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
 
 static void runICP(void * pvParameters){
   for(;;){
-    delay(1);//for watchdog
+    vTaskDelay(1);//for watchdog
     // SLAM: Core 0
     // Distance Sensor Output (Populating newCloud)
     if (xSemaphoreTake(xCoreSyncSemaphore, portMAX_DELAY) == pdTRUE){ //distData is read by the other core so only 1 core accesses I2C
       std::array<Eigen::Vector3f, 64> newCloud;
       std::array<boolean, 64> hasData;
+      xSemaphoreTake(distDataMutex, portMAX_DELAY);
       interpretDistances(distData, newCloud, hasData);
+      xSemaphoreGive(distDataMutex);
       //ICP
       if (cloud.pts.empty()){
       } else {
@@ -383,6 +402,7 @@ static void runICP(void * pvParameters){
 TaskHandle_t Core0Task;
 TaskHandle_t Core1Task;
 TaskHandle_t SerialLog;
+TaskHandle_t ToFReader;
 
 void setup()
 {
@@ -411,11 +431,12 @@ void setup()
   delay(20);
 
   Wire.begin(); //This resets to 100kHz I2C
-  Wire.setClock(400000); //Sensor has max I2C freq of 400kHz 
+  Wire.setClock(400000); //IMU has max I2C freq of 400kHz 
   SerialPort.println("Initializing sensor board. This can take up to 10s. Please wait.");
   if (ToF.begin() == false) {
     SerialPort.println(F("ToF Sensor not found - check your wiring. Freezing"));
-    while (1); }
+    while (1); 
+  }
   ToF.setSharpenerPercent(ToF_Sharpness);
   ToF.setResolution(8*8); //Enable all 64 pads
   ToF.setRangingFrequency(15);
@@ -424,6 +445,8 @@ void setup()
   dump_mem_usage();
   delay(1);
   xCoreSyncSemaphore = xSemaphoreCreateBinary();
+  i2cAccessMutex = xSemaphoreCreateMutex();
+  distDataMutex = xSemaphoreCreateMutex();
   inertialDataMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(
     runICP,
@@ -437,19 +460,28 @@ void setup()
   xTaskCreatePinnedToCore(
     I2CIntegrator,
     "Core1Task",
-    32768,
+    16384,
+    NULL,
+    3,
+    &Core1Task,
+    1
+  );
+  xTaskCreatePinnedToCore(
+    readToF,
+    "ToFReader",
+    8192,
     NULL,
     2,
-    &Core1Task,
+    &ToFReader,
     1
   );
   serial_queue = xQueueCreate(16, sizeof(const char *));
   xTaskCreatePinnedToCore(
     SerialLogger,
     "SerialLog",
-    8192,
+    4096,
     NULL,
-    1,
+    2,
     &SerialLog,
     1
   );
