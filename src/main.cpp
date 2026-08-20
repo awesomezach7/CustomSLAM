@@ -54,7 +54,6 @@ double elapsedTimeICP = endTimeICP - startTimeICP;
 SparkFun_VL53L5CX ToF;
 VL53L5CX_ResultsData distData; // Result data class structure, 1356 byes of RAM
 static SemaphoreHandle_t xCoreSyncSemaphore;
-static SemaphoreHandle_t i2cAccessMutex;
 static SemaphoreHandle_t distDataMutex;
 static SemaphoreHandle_t inertialDataMutex;
 
@@ -173,10 +172,8 @@ static void I2CIntegrator(void * pvParameters) {
     int32_t gyro[3];
     double accelerometer[3];
     double gyroscope[3];
-    xSemaphoreTake(i2cAccessMutex, portMAX_DELAY); //This is the root cause of the slowdown
     AccGyr.Get_X_Axes(acc);
     AccGyr.Get_G_Axes(gyro);
-    xSemaphoreGive(i2cAccessMutex);
     //Subtract Sample sums
     for(int i = 0; i < 3; i++) {
       //Changing to better type
@@ -216,22 +213,14 @@ static void I2CIntegrator(void * pvParameters) {
     String velocityEstimate = "Vel, "+String(velocity[0])+", "+String(velocity[1])+", "+String(velocity[2]);
     String inertialUpdate = orientationEstimate + ", " + positionEstimate + ", " + velocityEstimate + ", Time = " + String(elapsedTime * 1000) + " ms";
     serial_write(inertialUpdate);
-  }
-}
-
-static void readToF(void * pvParameters) {
-  for (;;) {
-    vTaskDelay(1);
-    xSemaphoreTake(distDataMutex, portMAX_DELAY);
-    xSemaphoreTake(i2cAccessMutex, portMAX_DELAY);
-    delay(1);
-    if (ToF.isDataReady() && ToF.getRangingData(&distData)) {
-      ToF.getRangingData(&distData);
-      xSemaphoreGive(xCoreSyncSemaphore);
-      serial_write("ToF Data read");
+    if (ToF.isDataReady()) {
+      xSemaphoreTake(distDataMutex, portMAX_DELAY);
+      if (ToF.getRangingData(&distData)){
+        xSemaphoreGive(xCoreSyncSemaphore);
+        serial_write("ToF Data read");
+      }
+      xSemaphoreGive(distDataMutex);
     }
-    xSemaphoreGive(i2cAccessMutex);
-    xSemaphoreGive(distDataMutex);
   }
 }
 
@@ -243,8 +232,7 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
   {
     for (int x = imageWidth - 1 ; x >= 0 ; x--)
     {
-      double dist = distData.distance_mm[x + y];
-      serial_write(String(dist));
+      double dist = distData.distance_mm[x + y]/1000;
       if (pdist[x+y] != dist && dist != 0){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
@@ -253,11 +241,10 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
         // Compute ST ray directions (normalized)
         // Ray direction = (cos_yaw * cos_pitch, sin_yaw * cos_pitch, sin_pitch)
         // Negate X to match our lens-flip convention
-        double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // This division is done strangely in reference
-        double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad); // I kept it in to make the endpoints be a plane
-        double st_ray_dir_z = 1;
+        double st_ray_dir_x = -std::cos(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad);
+        double st_ray_dir_y = std::sin(yaw_rad) * std::cos(pitch_rad) / std::sin(pitch_rad);
         //Point in Sensor's reference frame:
-        Eigen::Vector3d point = {st_ray_dir_y * dist/1000, st_ray_dir_x * dist/1000, st_ray_dir_z * dist/1000}; // divide by 1000 to convert mm to meters
+        Eigen::Vector3d point = {st_ray_dir_y * dist, st_ray_dir_x * dist, dist}; // divide by 1000 to convert mm to meters
         //Point in GLOBAL reference frame:
         xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
         Eigen::Vector3f point_prime = (Orientation * point).cast<float>();
@@ -271,7 +258,6 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
     }
   }
   xSemaphoreGive(distDataMutex);
-  serial_write("Distances Interpreted");
 }
 
 static void runICP(void * pvParameters){
@@ -295,7 +281,6 @@ static void runICP(void * pvParameters){
             }
           }
           serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
-          serial_write("Beginning ICP Iterations");
           Eigen::MatrixXd A = Eigen::MatrixXd::Zero(64, 6);
           Eigen::VectorXd b = Eigen::VectorXd::Zero(64);
           int n = 0;
@@ -343,12 +328,10 @@ static void runICP(void * pvParameters){
             A.conservativeResize(n, 6);
             b.conservativeResize(n);
             Eigen::VectorXd x_opt = Eigen::pseudoInverse(A)*b;
-            serial_write(String(x_opt[0]) + "," + String(x_opt[1]) + "," + String(x_opt[2]) + "," + String(x_opt[3]) + "," + String(x_opt[4]) + "," + String(x_opt[5]));
             //x_opt is a "vector" starting with euler angles, then translational position, centered at (0, 0, 0)
             //It must be applied to both the sensor position and newCloud
             //Turn x_opt into the 4x4 matrix transform it optimized for
             transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
-            //serial_write(String(x_opt(3)) + "," + String(x_opt(4)) + "," + String(x_opt(5)));
             /* Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
             Eigen::AngleAxisd angle_axis(transform_quat);
             transform_quat = Eigen::Quaterniond(Eigen::AngleAxisd(angle_axis.angle() * trust, angle_axis.axis()));
@@ -412,7 +395,6 @@ static void runICP(void * pvParameters){
 TaskHandle_t Core0Task;
 TaskHandle_t Core1Task;
 TaskHandle_t SerialLog;
-TaskHandle_t ToFReader;
 
 void setup()
 {
@@ -455,7 +437,6 @@ void setup()
   dump_mem_usage();
   delay(1);
   xCoreSyncSemaphore = xSemaphoreCreateBinary();
-  i2cAccessMutex = xSemaphoreCreateMutex();
   distDataMutex = xSemaphoreCreateMutex();
   inertialDataMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(
@@ -474,15 +455,6 @@ void setup()
     NULL,
     3,
     &Core1Task,
-    1
-  );
-  xTaskCreatePinnedToCore(
-    readToF,
-    "ToFReader",
-    8192,
-    NULL,
-    2,
-    &ToFReader,
     1
   );
   serial_queue = xQueueCreate(16, sizeof(const char *));
