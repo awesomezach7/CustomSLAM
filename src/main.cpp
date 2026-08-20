@@ -224,6 +224,7 @@ static void readToF(void * pvParameters) {
     vTaskDelay(1);
     xSemaphoreTake(distDataMutex, portMAX_DELAY);
     xSemaphoreTake(i2cAccessMutex, portMAX_DELAY);
+    delay(1);
     if (ToF.isDataReady() && ToF.getRangingData(&distData)) {
       ToF.getRangingData(&distData);
       xSemaphoreGive(xCoreSyncSemaphore);
@@ -237,11 +238,13 @@ static void readToF(void * pvParameters) {
 static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3f, 64>& newCloud, std::array<boolean, 64>& hasData) {
   //The ST library returns the data transposed from zone mapping shown in datasheet
   //Pretty-print data with increasing y, decreasing x to reflect reality
+  xSemaphoreTake(distDataMutex, portMAX_DELAY);
   for (int y = 0 ; y <= imageWidth * (imageWidth - 1) ; y += imageWidth)
   {
     for (int x = imageWidth - 1 ; x >= 0 ; x--)
     {
       double dist = distData.distance_mm[x + y];
+      serial_write(String(dist));
       if (pdist[x+y] != dist && dist != 0){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
@@ -267,6 +270,7 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
       }
     }
   }
+  xSemaphoreGive(distDataMutex);
   serial_write("Distances Interpreted");
 }
 
@@ -278,13 +282,19 @@ static void runICP(void * pvParameters){
     if (xSemaphoreTake(xCoreSyncSemaphore, portMAX_DELAY) == pdTRUE){ //distData is read by the other core so only 1 core accesses I2C
       std::array<Eigen::Vector3f, 64> newCloud;
       std::array<boolean, 64> hasData;
-      xSemaphoreTake(distDataMutex, portMAX_DELAY);
       interpretDistances(distData, newCloud, hasData);
-      xSemaphoreGive(distDataMutex);
       //ICP
       if (cloud.pts.empty()){
       } else {
         for (int i = 0; i < ICP_Iterations; i++){
+          String pointMsg = "OldPts";
+          for(int point = 0; point < 64; point++) {
+            if (hasData[point]) {
+              //Send point data
+              pointMsg += "," + String(newCloud[point][0]) + "," + String(newCloud[point][1]) + "," + String(newCloud[point][2]);
+            }
+          }
+          serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
           serial_write("Beginning ICP Iterations");
           Eigen::MatrixXd A = Eigen::MatrixXd::Zero(64, 6);
           Eigen::VectorXd b = Eigen::VectorXd::Zero(64);
