@@ -18,7 +18,6 @@ for port in ports:
 SerialPort.flushInput()
 SerialPort.flushOutput()
 time.sleep(1)
-scaleUp = 10
 
 def step(inputQueue, breadboard, pointCloud, newCloud):
     cloudUpdated = False
@@ -48,7 +47,7 @@ def main():
     server = viser.ViserServer()
     mesh = trimesh.load_mesh(str(Path(__file__).parent / "breadboard.obj"))
     assert isinstance(mesh, trimesh.Trimesh)
-    mesh.apply_scale(0.05)
+    mesh.apply_scale(0.01)
     inputQueue = deque()
     breadboard = server.scene.add_mesh_simple(
         "/Breadboard",
@@ -61,13 +60,13 @@ def main():
         "/Points",
         points = np.ndarray((0, 3)),
         colors = (82, 46, 242),
-        point_size = 0.1
+        point_size = 0.01
     )
     newCloud = server.scene.add_point_cloud(
         "/NewCloud",
         points = np.ndarray((0,3)),
         colors = (255, 96, 19),
-        point_size = 0.1
+        point_size = 0.01
     )
     print("Open your browser to http://localhost:8080")
     print("Press Ctrl+C to exit")
@@ -93,7 +92,7 @@ def main():
             newCloudPoints = np.ndarray((0,3))
             for i in range(1, int((len(Parsed)-1)/3)): # Start at 1 because 0th index is "NewPts"
                 try:
-                    newCloudPoints = np.append(newCloudPoints, [float(Parsed[3*i-2])*scaleUp, float(Parsed[3*i-1])*scaleUp, float(Parsed[3*i])*scaleUp])
+                    newCloudPoints = np.append(newCloudPoints, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
                 except ValueError, IndexError:
                     print("bad input")
             inputQueue.append(1)
@@ -101,7 +100,7 @@ def main():
         elif Parsed[0] == "Orient":
             try:
                 breadboardWxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
-                breadboardPosition = (20*float(Parsed[6]), 20*float(Parsed[7]), 20*float(Parsed[8]))
+                breadboardPosition = (float(Parsed[6]), float(Parsed[7]), float(Parsed[8]))
                 inputQueue.append(2)
                 inputQueue.append([breadboardWxyz, breadboardPosition])
             except ValueError, IndexError:
