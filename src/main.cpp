@@ -92,7 +92,7 @@ boolean newData = false;
 #define ICP_Iterations 3
 #define filter_distance 0.4
 #define VELOCITY_FILTER_RATIO 0.1
-#define USE_ICP false
+#define USE_ICP true
 #define USE_ACCELEROMETER false
 const double accoffset[3] = {36.8,-2.87,-36.5};
 const double gyrooffset[3] = {-342.2, 448.3, 790.0};
@@ -237,7 +237,6 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
     for (int x = imageWidth - 1 ; x >= 0 ; x--)
     {
       double dist = distData.distance_mm[x + y]/1000.0;
-      serial_write(String(distData.target_status[x+y]));
       if (pdist[x+y] != dist && dist != 0){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
@@ -258,7 +257,6 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
         pdist[x+y] = dist;
         hasData[x+y] = true;
       } else {
-        serial_write("point refused with distance " + String(dist));
         hasData[x+y] = false;
       }
     }

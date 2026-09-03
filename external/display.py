@@ -23,17 +23,18 @@ def step(inputQueue, breadboard, pointCloud, newCloud):
         identifier = inputQueue.popleft()
         if identifier == 0:
             pointCloudPoints = inputQueue.popleft()
-            print("Main point cloud updated")
+            print("Main point cloud updated--------------------------")
             pointCloud.points = np.append(pointCloud.points, pointCloudPoints)
             cloudUpdated = True
         elif identifier == 1:
             newCloudPoints = inputQueue.popleft()
-            print("Iteration begun")
+            print("Iteration begun-----------------------------------")
             newCloud.points = newCloudPoints
         elif identifier == 2:
             poseData = inputQueue.popleft()
-            print("pose data: ")
-            print(poseData)
+            print("Quaternion = ", poseData[0])
+            print("Position = ", poseData[1])
+            print("Velocity = ", poseData[2])
             breadboard.wxyz = poseData[0]
             breadboard.position = poseData[1]
         else:
@@ -98,8 +99,9 @@ def main():
             try:
                 breadboardWxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
                 breadboardPosition = (float(Parsed[6]), float(Parsed[7]), float(Parsed[8]))
+                breadboardVelocity = (float(Parsed[10]), float(Parsed[11]), float(Parsed[12]))
                 inputQueue.append(2)
-                inputQueue.append([breadboardWxyz, breadboardPosition])
+                inputQueue.append([breadboardWxyz, breadboardPosition, breadboardVelocity])
             except ValueError, IndexError:
                 print("bad input")
 
