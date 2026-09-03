@@ -92,6 +92,7 @@ boolean newData = false;
 #define ICP_Iterations 3
 #define filter_distance 0.4
 #define VELOCITY_FILTER_RATIO 0.1
+#define reflectance_percent_to_meters 0.02
 #define USE_ICP true
 #define USE_ACCELEROMETER false
 const double accoffset[3] = {36.8,-2.87,-36.5};
@@ -108,7 +109,7 @@ struct PointCloud
 {
     struct Point
     {
-        T x, y, z;
+        T x, y, z, r;
     };
 
     using coord_t = T;  //!< The type of each coordinate
@@ -128,8 +129,10 @@ struct PointCloud
             return pts[idx].x;
         else if (dim == 1)
             return pts[idx].y;
-        else
+        else if (dim == 2)
             return pts[idx].z;
+        else
+            return pts[idx].r;
     }
 
     // Optional bounding-box computation: return false to default to a standard
@@ -155,9 +158,9 @@ inline void dump_mem_usage() {
 
 PointCloud<float> cloud;
 using my_kd_tree_t = nanoflann::KDTreeSingleIndexDynamicAdaptor<
-        nanoflann::L2_Simple_Adaptor<float, PointCloud<float>>, PointCloud<float>, 3 /* dim */
+        nanoflann::L2_Simple_Adaptor<float, PointCloud<float>>, PointCloud<float>, 4 /* dim */
         >;
-my_kd_tree_t tree_index(3, cloud, max_leaf);
+my_kd_tree_t tree_index(4, cloud, max_leaf);
 // Cannot call functions at top level to add points
 
 static void I2CIntegrator(void * pvParameters) {
@@ -228,7 +231,7 @@ static void I2CIntegrator(void * pvParameters) {
   }
 }
 
-static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3f, 64>& newCloud, std::array<boolean, 64>& hasData) {
+static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::Vector3f, 64>& newCloud, std::array<float, 64>& reflect, std::array<boolean, 64>& hasData) {
   //The ST library returns the data transposed from zone mapping shown in datasheet
   //Pretty-print data with increasing y, decreasing x to reflect reality
   xSemaphoreTake(distDataMutex, portMAX_DELAY);
@@ -254,6 +257,7 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
         Eigen::Vector3f point_prime = (Orientation * point).cast<float>();
         newCloud[x+y] = {point_prime.x() + float(position[0]), point_prime.y() + float(position[1]), point_prime.z() + float(position[2])}; //Quaternion + position
         xSemaphoreGive(inertialDataMutex);
+        reflect[x+y] = float(distData.reflectance[x+y] * reflectance_percent_to_meters); // Max 255, normal max 100 as a percentage of reflected light.
         pdist[x+y] = dist;
         hasData[x+y] = true;
       } else {
@@ -271,8 +275,9 @@ static void runICP(void * pvParameters){
     // Distance Sensor Output (Populating newCloud)
     if (xSemaphoreTake(xCoreSyncSemaphore, portMAX_DELAY) == pdTRUE){ //distData is read by the other core so only 1 core accesses I2C
       std::array<Eigen::Vector3f, 64> newCloud;
+      std::array<float, 64> reflect;
       std::array<boolean, 64> hasData;
-      interpretDistances(distData, newCloud, hasData);
+      interpretDistances(distData, newCloud, reflect, hasData);
       //ICP
       if (!cloud.pts.empty()){
         for (int i = 0; i < ICP_Iterations; i++){
@@ -296,8 +301,8 @@ static void runICP(void * pvParameters){
               size_t ret_index[num_results];
               float out_dist_sqr[num_results]; //Square of distance
               resultSet.init(ret_index, out_dist_sqr);
-              double query_pt[3] = {newCloud[point][0], newCloud[point][1], newCloud[point][2]};
-              tree_index.findNeighbors(resultSet, newCloud[point].data(), {});
+              Eigen::Vector4f query_pt = {newCloud[point][0], newCloud[point][1], newCloud[point][2], reflect[point]};
+              tree_index.findNeighbors(resultSet, query_pt.data(), {});
               if (out_dist_sqr[0] <= filter_distance*filter_distance) { // For filtering, the closest point needs to be relatively close
                 n++;
                 //Normal vector is cross product of two vectors between points on the plane
@@ -372,7 +377,7 @@ static void runICP(void * pvParameters){
       for(int point = 0; point < 64; point++) {
         if (hasData[point]) {
           //Add point to cloud
-          cloud.pts.push_back({newCloud[point][0], newCloud[point][1], newCloud[point][2]});
+          cloud.pts.push_back({newCloud[point][0], newCloud[point][1], newCloud[point][2], reflect[point]});
           //Send point data
           pointMsg += "," + String(newCloud[point][0]) + "," + String(newCloud[point][1]) + "," + String(newCloud[point][2]);
         }
