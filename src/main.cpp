@@ -92,6 +92,8 @@ boolean newData = false;
 #define ICP_Iterations 3
 #define filter_distance 0.4
 #define VELOCITY_FILTER_RATIO 0.1
+#define USE_ICP false
+#define USE_ACCELEROMETER false
 const double accoffset[3] = {36.8,-2.87,-36.5};
 const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
@@ -200,10 +202,12 @@ static void I2CIntegrator(void * pvParameters) {
     trueAccel *= 9.8/1000;
     trueAccel[2] -= 9.8;
     xSemaphoreTake(inertialDataMutex, portMAX_DELAY);
-    for(int i = 0; i < 3; i++) {
-      //Double integration step (Not messing with trapezoids, ICP should fix anyways)
-      //velocity[i] += trueAccel[i] * elapsedTime;
-      //position[i] += velocity[i] * elapsedTime;
+    if (USE_ACCELEROMETER) {
+      for(int i = 0; i < 3; i++) {
+        //Double integration step (Not messing with trapezoids, ICP should fix anyways)
+        velocity[i] += trueAccel[i] * elapsedTime;
+        position[i] += velocity[i] * elapsedTime;
+      }
     }
     xSemaphoreGive(inertialDataMutex);
     vTaskDelay(1);
@@ -232,7 +236,8 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
   {
     for (int x = imageWidth - 1 ; x >= 0 ; x--)
     {
-      double dist = distData.distance_mm[x + y]/1000;
+      double dist = distData.distance_mm[x + y]/1000.0;
+      serial_write(String(distData.target_status[x+y]));
       if (pdist[x+y] != dist && dist != 0){ //Some extra complexity is added to ignore instances where the sensor does not give a new distance and reports the previous distance
         // === ST Lookup Table Method ===
         // Compute sin/cos for ST-calibrated pitch/yaw angles
@@ -253,6 +258,7 @@ static void interpretDistances(VL53L5CX_ResultsData distData, std::array<Eigen::
         pdist[x+y] = dist;
         hasData[x+y] = true;
       } else {
+        serial_write("point refused with distance " + String(dist));
         hasData[x+y] = false;
       }
     }
@@ -270,8 +276,7 @@ static void runICP(void * pvParameters){
       std::array<boolean, 64> hasData;
       interpretDistances(distData, newCloud, hasData);
       //ICP
-      if (cloud.pts.empty()){
-      } else {
+      if (!cloud.pts.empty()){
         for (int i = 0; i < ICP_Iterations; i++){
           String pointMsg = "OldPts";
           for(int point = 0; point < 64; point++) {
@@ -320,7 +325,7 @@ static void runICP(void * pvParameters){
           }
           serial_write("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
           Eigen::Matrix4d transform_opt;
-          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < 42){
+          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < 42 || !USE_ICP){
             //Cannot run pseudoInverse, revert to using identity matrix
             transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1;
           } else {
@@ -328,15 +333,8 @@ static void runICP(void * pvParameters){
             A.conservativeResize(n, 6);
             b.conservativeResize(n);
             Eigen::VectorXd x_opt = Eigen::pseudoInverse(A)*b;
-            //x_opt is a "vector" starting with euler angles, then translational position, centered at (0, 0, 0)
-            //It must be applied to both the sensor position and newCloud
             //Turn x_opt into the 4x4 matrix transform it optimized for
             transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
-            /* Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
-            Eigen::AngleAxisd angle_axis(transform_quat);
-            transform_quat = Eigen::Quaterniond(Eigen::AngleAxisd(angle_axis.angle() * trust, angle_axis.axis()));
-            transform_opt.topLeftCorner<3, 3>() = transform_quat.toRotationMatrix();
-            transform_opt.topRightCorner<3, 1>() *= trust; */
           }
           Eigen::Quaterniond transform_quat(transform_opt.topLeftCorner<3,3>());
           Eigen::Transform<double, 3, Eigen::Affine> transform(transform_opt); //Can be applied directly to 3d vectors now

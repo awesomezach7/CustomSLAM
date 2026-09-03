@@ -9,8 +9,6 @@ import viser.transforms as tf
 import trimesh
 from collections import deque
 
-import math
-
 ports = serial.tools.list_ports.comports()
 for port in ports:
     if port.device == "/dev/ttyACM0" or port.device == "/dev/ttyACM1" or port.device == "/dev/ttyACM2":
@@ -32,7 +30,6 @@ def step(inputQueue, breadboard, pointCloud, newCloud):
             newCloudPoints = inputQueue.popleft()
             print("Iteration begun")
             newCloud.points = newCloudPoints
-            cloudUpdated = True
         elif identifier == 2:
             poseData = inputQueue.popleft()
             print("pose data: ")
@@ -47,7 +44,7 @@ def main():
     server = viser.ViserServer()
     mesh = trimesh.load_mesh(str(Path(__file__).parent / "breadboard.obj"))
     assert isinstance(mesh, trimesh.Trimesh)
-    mesh.apply_scale(0.01)
+    mesh.apply_scale(0.001)
     inputQueue = deque()
     breadboard = server.scene.add_mesh_simple(
         "/Breadboard",
@@ -66,7 +63,7 @@ def main():
         "/NewCloud",
         points = np.ndarray((0,3)),
         colors = (255, 96, 19),
-        point_size = 0.01
+        point_size = 0.015
     )
     print("Open your browser to http://localhost:8080")
     print("Press Ctrl+C to exit")
@@ -83,7 +80,7 @@ def main():
             pointCloudPoints = np.ndarray((0,3))
             for i in range(1, int((len(Parsed)-1)/3)): # Start at 1 because 0th index is "NewPts"
                 try:
-                    pointCloudPoints = np.append(pointCloudPoints, [float(Parsed[3*i-2])*scaleUp, float(Parsed[3*i-1])*scaleUp, float(Parsed[3*i])*scaleUp])
+                    pointCloudPoints = np.append(pointCloudPoints, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
                 except ValueError, IndexError:
                     print("bad input")
             inputQueue.append(0)
