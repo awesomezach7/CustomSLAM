@@ -10,6 +10,7 @@ import trimesh
 from collections import deque
 
 step_through = False
+breadboardScale = 2
 
 ports = serial.tools.list_ports.comports()
 for port in ports:
@@ -49,7 +50,7 @@ def main():
     server = viser.ViserServer()
     mesh = trimesh.load_mesh(str(Path(__file__).parent / "breadboard.obj"))
     assert isinstance(mesh, trimesh.Trimesh)
-    mesh.apply_scale(0.001)
+    mesh.apply_scale(0.001 * breadboardScale)
     inputQueue = deque()
     breadboard = server.scene.add_mesh_simple(
         "/Breadboard",
