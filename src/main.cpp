@@ -90,15 +90,14 @@ boolean newData = false;
 #define microsteps 15
 #define max_leaf 12
 #define ICP_Iterations 3
-#define filter_distance 0.4
+#define filter_distance 0.10
 #define VELOCITY_FILTER_RATIO 0.1
-#define reflectance_percent_to_meters 0.02
+#define reflectance_percent_to_meters 0.004 // 0.10/0.004 = 25% is the maximum difference in reflectivity to be paired
 #define USE_ICP true
 #define USE_ACCELEROMETER false
 const double accoffset[3] = {36.8,-2.87,-36.5};
 const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
-
 
 Eigen::Quaterniond Orientation(1.0, 0.0, 0.0, 0.0);
 Eigen::Vector3d velocity(0.0, 0.0, 0.0);
@@ -301,9 +300,10 @@ static void runICP(void * pvParameters){
               size_t ret_index[num_results];
               float out_dist_sqr[num_results]; //Square of distance
               resultSet.init(ret_index, out_dist_sqr);
-              Eigen::Vector4f query_pt = {newCloud[point][0], newCloud[point][1], newCloud[point][2], reflect[point]};
-              tree_index.findNeighbors(resultSet, query_pt.data(), {});
-              if (out_dist_sqr[0] <= filter_distance*filter_distance) { // For filtering, the closest point needs to be relatively close
+              float query_pt[4] = {newCloud[point][0], newCloud[point][1], newCloud[point][2], reflect[point]};
+              tree_index.findNeighbors(resultSet, query_pt, {});
+
+              if (out_dist_sqr[2] <= filter_distance*filter_distance) { // For filtering, the closest point needs to be relatively close
                 n++;
                 //Normal vector is cross product of two vectors between points on the plane
                 PointCloud<float>::Point pt1 = cloud.pts[ret_index[0]];
@@ -328,8 +328,11 @@ static void runICP(void * pvParameters){
           }
           serial_write("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
           Eigen::Matrix4d transform_opt;
-          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < 42 || !USE_ICP){
-            //Cannot run pseudoInverse, revert to using identity matrix
+          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < 45 || !USE_ICP){
+            //Revert to using identity matrix
+            if (USE_ICP) {
+              serial_write("bad or not enough data for cloud alignment");
+            }
             transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1;
           } else {
             //Free extra size of MatrixXd based on final value of n
@@ -352,9 +355,8 @@ static void runICP(void * pvParameters){
           //Update velocity (drag towards new value at 1/2 ratio)
           if (firstLoopICP) {
             firstLoopICP = false;
-            startTimeICP = micros();
             elapsedTimeICP = 2; //Set to 2 seconds if unknown, effectively a higher filter ratio
-            endTimeICP = micros();
+            startTimeICP = micros();
           } else {
             endTimeICP = micros();
             elapsedTimeICP = double(endTimeICP - startTimeICP)/1000000.0; //seconds

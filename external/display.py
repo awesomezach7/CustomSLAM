@@ -9,6 +9,8 @@ import viser.transforms as tf
 import trimesh
 from collections import deque
 
+step_through = False
+
 ports = serial.tools.list_ports.comports()
 for port in ports:
     if port.device == "/dev/ttyACM0" or port.device == "/dev/ttyACM1" or port.device == "/dev/ttyACM2":
@@ -23,13 +25,15 @@ def step(inputQueue, breadboard, pointCloud, newCloud):
         identifier = inputQueue.popleft()
         if identifier == 0:
             pointCloudPoints = inputQueue.popleft()
-            print("Main point cloud updated--------------------------")
+            print("Main point cloud updated-------------------------------------------------")
             pointCloud.points = np.append(pointCloud.points, pointCloudPoints)
+            newCloud.points = pointCloudPoints #Uses newCloud and recolors to indicate new addition to the total pointCloud
             cloudUpdated = True
         elif identifier == 1:
             newCloudPoints = inputQueue.popleft()
-            print("Iteration begun-----------------------------------")
+            print("Iteration begun----------------------------------------------------------")
             newCloud.points = newCloudPoints
+            cloudUpdated = True
         elif identifier == 2:
             poseData = inputQueue.popleft()
             print("Quaternion = ", poseData[0])
@@ -68,8 +72,9 @@ def main():
     )
     print("Open your browser to http://localhost:8080")
     print("Press Ctrl+C to exit")
-    button = server.gui.add_button(label="Step", color="indigo")
-    button.on_click(lambda _:(step(inputQueue, breadboard, pointCloud, newCloud)))
+    if (step_through):
+        button = server.gui.add_button(label="Step", color="indigo")
+        button.on_click(lambda _:(step(inputQueue, breadboard, pointCloud, newCloud)))
     while True:
         try:
             Input = SerialPort.readline().decode('utf-8').rstrip()
@@ -81,12 +86,15 @@ def main():
             pointCloudPoints = np.ndarray((0,3))
             for i in range(1, int((len(Parsed)-1)/3)): # Start at 1 because 0th index is "NewPts"
                 try:
-                    pointCloudPoints = np.append(pointCloudPoints, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
+                    if step_through:
+                        pointCloudPoints = np.append(pointCloudPoints, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
+                    else:
+                        pointCloud.points = np.append(pointCloud.points, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
                 except ValueError, IndexError:
                     print("bad input")
             inputQueue.append(0)
             inputQueue.append(pointCloudPoints)
-        if Parsed[0] == "OldPts":
+        if Parsed[0] == "OldPts" and step_through:
             newCloudPoints = np.ndarray((0,3))
             for i in range(1, int((len(Parsed)-1)/3)): # Start at 1 because 0th index is "NewPts"
                 try:
@@ -97,11 +105,15 @@ def main():
             inputQueue.append(newCloudPoints)
         elif Parsed[0] == "Orient":
             try:
-                breadboardWxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
-                breadboardPosition = (float(Parsed[6]), float(Parsed[7]), float(Parsed[8]))
-                breadboardVelocity = (float(Parsed[10]), float(Parsed[11]), float(Parsed[12]))
-                inputQueue.append(2)
-                inputQueue.append([breadboardWxyz, breadboardPosition, breadboardVelocity])
+                if step_through:
+                    breadboardWxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
+                    breadboardPosition = (float(Parsed[6]), float(Parsed[7]), float(Parsed[8]))
+                    breadboardVelocity = (float(Parsed[10]), float(Parsed[11]), float(Parsed[12]))
+                    inputQueue.append(2)
+                    inputQueue.append([breadboardWxyz, breadboardPosition, breadboardVelocity])
+                else:
+                    breadboard.wxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
+                    breadboard.position = (float(Parsed[6]), float(Parsed[7]), float(Parsed[8]))
             except ValueError, IndexError:
                 print("bad input")
 
