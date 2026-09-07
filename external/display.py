@@ -92,7 +92,8 @@ def main():
                     else:
                         pointCloud.points = np.append(pointCloud.points, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
                 except ValueError, IndexError:
-                    print("bad input")
+                    SerialPort.flushInput()
+                    SerialPort.flushOutput()
             inputQueue.append(0)
             inputQueue.append(pointCloudPoints)
         if Parsed[0] == "OldPts" and step_through:
@@ -101,7 +102,8 @@ def main():
                 try:
                     newCloudPoints = np.append(newCloudPoints, [float(Parsed[3*i-2]), float(Parsed[3*i-1]), float(Parsed[3*i])])
                 except ValueError, IndexError:
-                    print("bad input")
+                    SerialPort.flushInput()
+                    SerialPort.flushOutput()
             inputQueue.append(1)
             inputQueue.append(newCloudPoints)
         elif Parsed[0] == "Orient":
@@ -116,7 +118,8 @@ def main():
                     breadboard.wxyz = tf.SO3.from_quaternion_xyzw(xyzw = np.array([float(Parsed[2]), float(Parsed[3]), float(Parsed[4]), float(Parsed[1])])).wxyz
                     breadboard.position = (float(Parsed[6]), float(Parsed[7]), float(Parsed[8]))
             except ValueError, IndexError:
-                print("bad input")
+                SerialPort.flushInput()
+                SerialPort.flushOutput()
 
 if __name__=="__main__":
     main()
