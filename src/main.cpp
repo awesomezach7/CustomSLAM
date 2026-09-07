@@ -88,7 +88,7 @@ double pdist[64];
 #define microsteps 15
 #define max_leaf 12
 #define ICP_Iterations 3
-#define filter_distance 0.1
+#define filter_distance 0.4
 #define min_matches 30
 #define VELOCITY_FILTER_RATIO 0.1
 #define reflectance_percent_to_meters 0.01 // 10% is the maximum difference in reflectivity to be paired
