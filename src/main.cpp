@@ -90,11 +90,13 @@ boolean newData = false;
 #define microsteps 15
 #define max_leaf 12
 #define ICP_Iterations 3
-#define filter_distance 0.10
+#define filter_distance 0.08
+#define min_matches 30
 #define VELOCITY_FILTER_RATIO 0.1
-#define reflectance_percent_to_meters 0.004 // 0.10/0.004 = 25% is the maximum difference in reflectivity to be paired
+#define reflectance_percent_to_meters 0.0035 // 0.10/0.004 = 25% is the maximum difference in reflectivity to be paired
 #define USE_ICP true
 #define USE_ACCELEROMETER false
+#define SEND_INTERMEDIATE_CLOUDS false
 const double accoffset[3] = {36.8,-2.87,-36.5};
 const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
@@ -280,14 +282,15 @@ static void runICP(void * pvParameters){
       //ICP
       if (!cloud.pts.empty()){
         for (int i = 0; i < ICP_Iterations; i++){
-          String pointMsg = "OldPts";
-          for(int point = 0; point < 64; point++) {
-            if (hasData[point]) {
-              //Send point data
-              pointMsg += "," + String(newCloud[point][0]) + "," + String(newCloud[point][1]) + "," + String(newCloud[point][2]);
+          if (SEND_INTERMEDIATE_CLOUDS) {
+            String pointMsg = "OldPts";
+            for(int point = 0; point < 64; point++) {
+              if (hasData[point]) {
+                pointMsg += "," + String(newCloud[point][0]) + "," + String(newCloud[point][1]) + "," + String(newCloud[point][2]);
+              }
             }
+            serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
           }
-          serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
           Eigen::MatrixXd A = Eigen::MatrixXd::Zero(64, 6);
           Eigen::VectorXd b = Eigen::VectorXd::Zero(64);
           int n = 0;
@@ -328,7 +331,7 @@ static void runICP(void * pvParameters){
           }
           serial_write("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
           Eigen::Matrix4d transform_opt;
-          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < 45 || !USE_ICP){
+          if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < min_matches || !USE_ICP){
             //Revert to using identity matrix
             if (USE_ICP) {
               serial_write("bad or not enough data for cloud alignment");
