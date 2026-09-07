@@ -83,20 +83,22 @@ double ST_YAW_ANGLES_DEG[64] = {
 
 double pdist[64];
 
-boolean newData = false;
-
 //TWEAKABLE VALUES
 #define ToF_Sharpness 20
 #define microsteps 15
 #define max_leaf 12
 #define ICP_Iterations 3
-#define filter_distance 0.08
+#define filter_distance 0.1
 #define min_matches 30
 #define VELOCITY_FILTER_RATIO 0.1
-#define reflectance_percent_to_meters 0.0035 // 0.10/0.004 = 25% is the maximum difference in reflectivity to be paired
+#define reflectance_percent_to_meters 0.01 // 10% is the maximum difference in reflectivity to be paired
+#define radians_to_meters 0
+#define position_to_meters 0
+#define DAMPEN_MOTION false
 #define USE_ICP true
 #define USE_ACCELEROMETER false
 #define SEND_INTERMEDIATE_CLOUDS false
+
 const double accoffset[3] = {36.8,-2.87,-36.5};
 const double gyrooffset[3] = {-342.2, 448.3, 790.0};
 //Note that the type used for the point cloud is also tweakable (may use half_float for less memory usage)
@@ -291,8 +293,8 @@ static void runICP(void * pvParameters){
             }
             serial_write(pointMsg);//TODO: Sending data takes 5ms, that is a problem! I think I need to send the data as a binary.
           }
-          Eigen::MatrixXd A = Eigen::MatrixXd::Zero(64, 6);
-          Eigen::VectorXd b = Eigen::VectorXd::Zero(64);
+          Eigen::MatrixXd A = Eigen::MatrixXd::Zero(70, 6);
+          Eigen::VectorXd b = Eigen::VectorXd::Zero(70);
           int n = 0;
           for (int point = 0; point < 64; point++){ //Iterate over every point
             if (hasData[point]) {
@@ -329,6 +331,25 @@ static void runICP(void * pvParameters){
               }
             }
           }
+          if (DAMPEN_MOTION) {
+            std::array<Eigen::VectorXd, 6> final_rows;
+            final_rows[0].resize(6);
+            final_rows[0] << radians_to_meters, 0, 0, 0, 0, 0;
+            final_rows[1].resize(6);
+            final_rows[1] << 0, radians_to_meters, 0, 0, 0, 0;
+            final_rows[2].resize(6);
+            final_rows[2] << 0, 0, radians_to_meters, 0, 0, 0;
+            final_rows[3].resize(6);
+            final_rows[3] << 0, 0, 0, position_to_meters, 0, 0;
+            final_rows[4].resize(6);
+            final_rows[4] << 0, 0, 0, 0, position_to_meters, 0;
+            final_rows[5].resize(6);
+            final_rows[5] << 0, 0, 0, 0, 0, position_to_meters;
+            for (int i = 0; i < 6; i++) {
+              A.row(n + i) = final_rows[i];
+              b(n + i) = 0;
+            }
+          }
           serial_write("All points processed for iteration: " + String(i + 1) + ", and there were " + String(n) + " good points");
           Eigen::Matrix4d transform_opt;
           if (A.rows() == 0 || A.cols() == 0 || !A.allFinite() || A.cwiseAbs().maxCoeff() == 0.0 || n < min_matches || !USE_ICP){
@@ -339,8 +360,13 @@ static void runICP(void * pvParameters){
             transform_opt << 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1;
           } else {
             //Free extra size of MatrixXd based on final value of n
-            A.conservativeResize(n, 6);
-            b.conservativeResize(n);
+            if (DAMPEN_MOTION) {
+              A.conservativeResize(n + 6, 6);
+              b.conservativeResize(n + 6);
+            } else {
+              A.conservativeResize(n, 6);
+              b.conservativeResize(n);
+            }
             Eigen::VectorXd x_opt = Eigen::pseudoInverse(A)*b;
             //Turn x_opt into the 4x4 matrix transform it optimized for
             transform_opt << 1, -x_opt(2), x_opt(1), x_opt(3), x_opt(2), 1, -x_opt(0), x_opt(4), -x_opt(1), x_opt(0), 1, x_opt(5), 0, 0, 0, 1;
